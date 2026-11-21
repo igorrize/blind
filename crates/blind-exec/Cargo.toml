@@ -1,0 +1,13 @@
+[package]
+name = "blind-exec"
+description = "Sandboxed executor for blind workers. Deliberately has no HTTP client."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+blind-core = { path = "../blind-core" }

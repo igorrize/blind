@@ -1,0 +1,4 @@
+{
+  "description": "Finds the files a task is about.",
+  "model": "ollama-cloud/gemma4:31b"
+}
