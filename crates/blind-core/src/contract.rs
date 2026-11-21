@@ -1,6 +1,7 @@
 use serde::Deserialize;
 
 use crate::agent_name::AgentName;
+use crate::reading_tool::ReadingTool;
 use crate::schema::{ObjectSchema, Schema, SchemaProblem};
 
 const TASK_FIELD: &str = "task";
@@ -18,6 +19,8 @@ pub struct Rights {
     read: Vec<String>,
     #[serde(default)]
     write: Vec<String>,
+    read_from: Option<String>,
+    tools: Option<Vec<ReadingTool>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +56,10 @@ pub enum ContractError {
     },
     #[error("input must not declare `task`: the harness adds it to every step")]
     TaskIsReserved,
+    #[error("rights: read_from names `{0}`, which is not an input field holding a list of strings")]
+    ReadFromIsNotAListOfPaths(String),
+    #[error("rights: read_from and tools make sense only together with read patterns")]
+    FileRightsWithoutRead,
 }
 
 impl Contract {
@@ -63,6 +70,7 @@ impl Contract {
         if input.declares(TASK_FIELD) {
             return Err(ContractError::TaskIsReserved);
         }
+        unchecked.rights.check_against(&input)?;
         Ok(Self {
             name: unchecked.name,
             kind: unchecked.kind,
@@ -100,6 +108,29 @@ impl Rights {
 
     pub fn write(&self) -> &[String] {
         &self.write
+    }
+
+    pub fn read_from(&self) -> Option<&str> {
+        self.read_from.as_deref()
+    }
+
+    pub fn tools(&self) -> Vec<ReadingTool> {
+        self.tools
+            .clone()
+            .unwrap_or_else(|| ReadingTool::ALL.to_vec())
+    }
+
+    fn check_against(&self, input: &ObjectSchema) -> Result<(), ContractError> {
+        let narrows_reading = self.read_from.is_some() || self.tools.is_some();
+        if narrows_reading && self.read.is_empty() {
+            return Err(ContractError::FileRightsWithoutRead);
+        }
+        match &self.read_from {
+            Some(field) if !input.holds_a_list_of_strings(field) => {
+                Err(ContractError::ReadFromIsNotAListOfPaths(field.clone()))
+            }
+            Some(_) | None => Ok(()),
+        }
     }
 }
 
@@ -207,6 +238,62 @@ mod tests {
             error,
             "output: `findings` is required but not declared in properties"
         );
+    }
+
+    fn with_rights(rights: &str) -> String {
+        let files = r#"{"type":"object","properties":{
+            "files":{"type":"array","items":{"type":"string"}},
+            "count":{"type":"integer"}}}"#;
+        format!(
+            r#"{{"name":"reviewer","kind":"worker","input":{files},"output":{NO_FIELDS},"rights":{rights}}}"#
+        )
+    }
+
+    #[test]
+    fn contract_without_tool_list_allows_every_reading_tool() {
+        let contract = Contract::from_json(&with_rights(r#"{"read":["**"]}"#)).expect("valid");
+        assert_eq!(contract.rights().tools(), ReadingTool::ALL);
+        assert_eq!(contract.rights().read_from(), None);
+    }
+
+    #[test]
+    fn contract_can_narrow_tools_and_reading() {
+        let rights = r#"{"read":["**"],"read_from":"files","tools":["grep","read_file"]}"#;
+        let contract = Contract::from_json(&with_rights(rights)).expect("valid");
+        assert_eq!(
+            contract.rights().tools(),
+            [ReadingTool::Grep, ReadingTool::ReadFile]
+        );
+        assert_eq!(contract.rights().read_from(), Some("files"));
+    }
+
+    #[test]
+    fn rejects_a_tool_outside_the_catalogue() {
+        let error = rejection(&with_rights(r#"{"read":["**"],"tools":["bash"]}"#));
+        assert!(error.contains("unknown variant `bash`"), "{error}");
+    }
+
+    #[test]
+    fn read_from_must_name_an_input_list_of_strings() {
+        for field in ["count", "absent"] {
+            let rights = format!(r#"{{"read":["**"],"read_from":"{field}"}}"#);
+            let error = rejection(&with_rights(&rights));
+            assert!(
+                error.contains("not an input field holding a list of strings"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn narrowing_without_read_patterns_is_rejected() {
+        for rights in [r#"{"read_from":"files"}"#, r#"{"tools":["grep"]}"#] {
+            let error = rejection(&with_rights(rights));
+            assert!(
+                error.contains("only together with read patterns"),
+                "{error}"
+            );
+        }
     }
 
     #[test]

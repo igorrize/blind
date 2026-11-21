@@ -1,10 +1,17 @@
 mod covers;
+mod json_schema;
+mod project;
+mod validate;
+
+#[cfg(test)]
+mod properties;
 
 use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
 pub use covers::Mismatch;
+pub use validate::Violation;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(
@@ -64,6 +71,13 @@ impl ObjectSchema {
 
     pub fn declares(&self, name: &str) -> bool {
         self.properties.contains_key(name)
+    }
+
+    pub fn holds_a_list_of_strings(&self, name: &str) -> bool {
+        let Some(Schema::Array { items, .. }) = self.properties.get(name) else {
+            return false;
+        };
+        matches!(**items, Schema::String { .. })
     }
 
     fn check_at(&self, path: &str) -> Result<(), SchemaProblem> {

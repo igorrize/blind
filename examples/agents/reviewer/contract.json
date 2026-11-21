@@ -16,6 +16,7 @@
     }
   },
   "rights": {
-    "read": ["src/**"]
+    "read": ["**"],
+    "read_from": "files"
   }
 }

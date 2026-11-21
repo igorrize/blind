@@ -13,6 +13,7 @@
     }
   },
   "rights": {
-    "read": ["**"]
+    "read": ["**"],
+    "tools": ["find_files", "grep", "list_files"]
   }
 }

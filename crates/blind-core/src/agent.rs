@@ -1,6 +1,7 @@
 use serde::Deserialize;
 
 use crate::contract::{Contract, ContractError};
+use crate::limits::{LimitOutOfRange, Limits};
 use crate::model_ref::ModelRef;
 
 pub const CONTRACT_FILE: &str = "contract.json";
@@ -12,6 +13,8 @@ pub const PROMPT_FILE: &str = "prompt.md";
 pub struct AgentSettings {
     description: String,
     model: ModelRef,
+    #[serde(default)]
+    limits: Limits,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,6 +32,8 @@ pub enum AgentError {
     Settings(#[from] serde_json::Error),
     #[error("{file}: description is empty", file = SETTINGS_FILE)]
     EmptyDescription,
+    #[error("{file}: {0}", file = SETTINGS_FILE)]
+    Limits(#[from] LimitOutOfRange),
     #[error("{file} is empty", file = PROMPT_FILE)]
     EmptyPrompt,
 }
@@ -47,6 +52,7 @@ impl Agent {
         if prompt.trim().is_empty() {
             return Err(AgentError::EmptyPrompt);
         }
+        settings.limits.check()?;
         Ok(Self {
             contract,
             settings,
@@ -74,6 +80,10 @@ impl AgentSettings {
 
     pub fn model(&self) -> &ModelRef {
         &self.model
+    }
+
+    pub fn limits(&self) -> Limits {
+        self.limits
     }
 }
 
@@ -138,6 +148,28 @@ mod tests {
         assert_eq!(
             rejection(CONTRACT, &settings, PROMPT),
             "agent.json: description is empty"
+        );
+    }
+
+    #[test]
+    fn agent_without_limits_gets_the_defaults() {
+        let agent = Agent::from_parts(CONTRACT, SETTINGS, PROMPT.to_owned()).expect("valid agent");
+        assert_eq!(agent.settings().limits(), Limits::default());
+    }
+
+    #[test]
+    fn agent_can_tighten_its_limits() {
+        let settings = SETTINGS.replace(r#""model""#, r#""limits":{"tool_calls":5},"model""#);
+        let agent = Agent::from_parts(CONTRACT, &settings, PROMPT.to_owned()).expect("valid agent");
+        assert_eq!(agent.settings().limits().tool_calls, 5);
+    }
+
+    #[test]
+    fn limit_above_the_harness_ceiling_is_rejected() {
+        let settings = SETTINGS.replace(r#""model""#, r#""limits":{"turns":61},"model""#);
+        assert_eq!(
+            rejection(CONTRACT, &settings, PROMPT),
+            "agent.json: limits.turns must be between 1 and 60"
         );
     }
 

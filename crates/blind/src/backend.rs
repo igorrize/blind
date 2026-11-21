@@ -10,6 +10,9 @@ use crate::conversation::{Conversation, Entry, ReplyEvent, Speaker};
 use crate::providers::{Message, OpenAiCompatible};
 use crate::runtime;
 
+#[cfg(test)]
+mod guarantees;
+
 const ROOT_PROMPT: &str = "You are root, the conversational agent of the blind harness. \
 You only talk with the user: you cannot read files, run commands or call other agents yet. \
 Answer in the user's language.";

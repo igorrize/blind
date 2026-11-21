@@ -8,7 +8,7 @@ A TUI harness for AI agents with super-strict limits on agents and sub-agents.
 - Rights only shrink down the call tree. Only a human writes and approves the rules.
 
 Status: **in progress** — strict JSON contracts, chain type checks, `blind agent check`, an OpenAI-compatible
-provider (ollama.com) and a chat with root in the TUI. Workers do not run yet. Design: [`docs/DESIGN.md`](docs/DESIGN.md).
+provider (ollama.com), a chat with root in the TUI, workers under a contract (`blind run`) and chains of them (`blind chain run`). Workers can find, list, read and search project files (search runs on the fff engine) within the read rights of their contract; they cannot write or run commands yet. Design: [`docs/DESIGN.md`](docs/DESIGN.md).
 
 ## Build
 
@@ -39,6 +39,9 @@ export OLLAMA_API_KEY=...
 cargo blind models                                  # model names the provider offers
 cargo blind ask "Say hello in one sentence."
 cargo blind ask "..." --model ollama-cloud/glm-5.3-flash
+cargo blind run planner --dir examples/agents --task "Add a --json flag to agent check"
+cargo blind chain check explorer reviewer fixer --dir examples/agents
+cargo blind chain run explorer reviewer --dir examples/agents --project . --task "Review the contract loader"
 ```
 
 The key is read from the environment only and never written to a file.
@@ -49,8 +52,10 @@ pick the theme and the root model, `r` reloads the model list), `Ctrl-C` quits. 
 `cargo blind` is an alias from `.cargo/config.toml`. To get a plain `blind` command:
 
 ```sh
-cargo install --path crates/blind
+cargo install --locked --path crates/blind
 ```
+
+`--locked` is required: the file search engine builds only with the dependency versions pinned in `Cargo.lock`.
 
 ## Layout
 

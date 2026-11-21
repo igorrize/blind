@@ -1,0 +1,16 @@
+{
+  "name": "planner",
+  "kind": "worker",
+  "input": {
+    "type": "object",
+    "properties": {}
+  },
+  "output": {
+    "type": "object",
+    "required": ["steps", "risky"],
+    "properties": {
+      "steps": { "type": "array", "maxItems": 10, "items": { "type": "string", "maxLength": 200 } },
+      "risky": { "type": "boolean" }
+    }
+  }
+}

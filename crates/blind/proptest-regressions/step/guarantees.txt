@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 3e1e6f81f09424ab3f5025debe12147db6404a9dc8488b891c291e6df30285b2 # shrinks to plan = Object {}
+cc ed1a0c8f2289e9a516ea589df1949a230a584cfafbcf1aa6812c81064c489de7 # shrinks to plan = Object {"risky": Bool(false), "secret": String("leak"), "steps": Array []}

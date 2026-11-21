@@ -1,4 +1,5 @@
 {
   "description": "Reviews the given files and lists findings. Does not change code.",
-  "model": "ollama-cloud/gemma4:31b"
+  "model": "ollama-cloud/glm-5.3-flash",
+  "limits": { "tool_calls": 25 }
 }

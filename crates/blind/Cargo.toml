@@ -12,6 +12,7 @@ workspace = true
 [dependencies]
 anyhow = "1.0.104"
 blind-core = { path = "../blind-core" }
+blind-exec = { version = "0.0.1", path = "../blind-exec" }
 catppuccin = "2.9.1"
 clap = { version = "4.6.7", features = ["derive"] }
 ratatui = "0.30.2"
@@ -25,5 +26,6 @@ toml = "1.2.1"
 toml_edit = "0.25.20"
 
 [dev-dependencies]
+proptest = "1.12.0"
 tempfile = "3.27.0"
 wiremock = "0.6.5"

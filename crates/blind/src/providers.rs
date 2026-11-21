@@ -1,10 +1,10 @@
 pub mod config;
-mod openai;
+pub mod openai;
 mod sse;
 
 use config::{ProviderKind, ProvidersConfig};
 
-pub use openai::{Message, OpenAiCompatible};
+pub use openai::{Message, OpenAiCompatible, ProviderError, ToolCall, ToolSpec, Turn};
 
 pub fn connect(config: &ProvidersConfig, provider: &str) -> anyhow::Result<OpenAiCompatible> {
     let provider = config.provider(provider)?;

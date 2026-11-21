@@ -1,6 +1,8 @@
 use std::{fs, io, path::Path};
 
-use blind_core::{Agent, AgentError, CONTRACT_FILE, PROMPT_FILE, SETTINGS_FILE};
+use blind_core::{
+    Agent, AgentError, AgentName, CONTRACT_FILE, InvalidAgentName, PROMPT_FILE, SETTINGS_FILE,
+};
 
 pub struct Loaded {
     pub folder: String,
@@ -16,6 +18,12 @@ pub enum LoadError {
     },
     #[error(transparent)]
     Invalid(#[from] AgentError),
+    #[error(transparent)]
+    BadName(#[from] InvalidAgentName),
+    #[error("there is no agent folder `{0}`")]
+    NoSuchFolder(String),
+    #[error("{file}: rights: {0}", file = CONTRACT_FILE)]
+    BadRights(#[from] blind_exec::PolicyError),
     #[error("folder is `{folder}` but {file} names the agent `{name}`", file = CONTRACT_FILE)]
     NameMismatch { folder: String, name: String },
 }
@@ -24,6 +32,19 @@ pub fn load_all(dir: &Path) -> io::Result<Vec<Loaded>> {
     let mut folders = agent_folders(dir)?;
     folders.sort();
     Ok(folders.iter().map(|folder| load(dir, folder)).collect())
+}
+
+pub fn load_one(dir: &Path, name: &str) -> Result<Agent, LoadError> {
+    let name = AgentName::try_from(name.to_owned())?;
+    let folder = dir.join(name.as_str());
+    if !is_real_folder(&folder) {
+        return Err(LoadError::NoSuchFolder(name.as_str().to_owned()));
+    }
+    load_agent(&folder, name.as_str())
+}
+
+fn is_real_folder(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir())
 }
 
 fn agent_folders(dir: &Path) -> io::Result<Vec<String>> {
@@ -49,6 +70,8 @@ fn load_agent(path: &Path, folder: &str) -> Result<Agent, LoadError> {
     let settings = read(path, SETTINGS_FILE)?;
     let prompt = read(path, PROMPT_FILE)?;
     let agent = Agent::from_parts(&contract, &settings, prompt)?;
+    blind_exec::check_patterns(agent.contract().rights().read())?;
+    blind_exec::check_patterns(agent.contract().rights().write())?;
     let name = agent.contract().name().as_str();
     if name == folder {
         Ok(agent)
@@ -132,6 +155,55 @@ mod tests {
         assert_eq!(
             outcome_text(&loaded[0]),
             "folder is `explorer` but contract.json names the agent `reviewer`"
+        );
+    }
+
+    fn refusal(dir: &Path, name: &str) -> String {
+        load_one(dir, name)
+            .expect_err("must be refused")
+            .to_string()
+    }
+
+    #[test]
+    fn one_agent_is_loaded_by_name() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        write_agent(dir.path(), "explorer", "explorer");
+        let agent = load_one(dir.path(), "explorer").expect("valid agent");
+        assert_eq!(agent.contract().name().as_str(), "explorer");
+    }
+
+    #[test]
+    fn name_that_leaves_the_agents_folder_is_refused_before_any_file_is_read() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        fs::create_dir(dir.path().join("agents")).expect("agents");
+        write_agent(dir.path(), "outside", "outside");
+        let agents = dir.path().join("agents");
+        for name in ["../outside", "..", "a/b", "/etc", ""] {
+            let refused = refusal(&agents, name);
+            assert!(refused.starts_with("agent name `"), "{name:?}: {refused}");
+        }
+    }
+
+    #[test]
+    fn linked_agent_folder_is_refused_like_the_listing_skips_it() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        fs::create_dir(dir.path().join("agents")).expect("agents");
+        write_agent(dir.path(), "explorer", "explorer");
+        let agents = dir.path().join("agents");
+        std::os::unix::fs::symlink("../explorer", agents.join("explorer")).expect("link");
+        assert!(load_all(&agents).expect("readable dir").is_empty());
+        assert_eq!(
+            refusal(&agents, "explorer"),
+            "there is no agent folder `explorer`"
+        );
+    }
+
+    #[test]
+    fn unknown_agent_is_reported_by_name() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        assert_eq!(
+            refusal(dir.path(), "ghost"),
+            "there is no agent folder `ghost`"
         );
     }
 

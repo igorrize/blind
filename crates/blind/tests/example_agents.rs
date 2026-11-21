@@ -19,9 +19,10 @@ fn example_agents_pass_the_check() {
     assert!(passed, "{report}");
     assert_eq!(
         report,
-        "ok     explorer  ollama-cloud/gemma4:31b\n\
-         ok     fixer  ollama-cloud/gemma4:31b\n\
-         ok     reviewer  ollama-cloud/gemma4:31b\n"
+        "ok     explorer  ollama-cloud/glm-5.3-flash\n\
+         ok     fixer  ollama-cloud/glm-5.3-flash\n\
+         ok     planner  ollama-cloud/glm-5.3-flash\n\
+         ok     reviewer  ollama-cloud/glm-5.3-flash\n"
     );
 }
 
