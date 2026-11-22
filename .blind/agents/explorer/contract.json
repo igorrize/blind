@@ -1,0 +1,19 @@
+{
+  "name": "explorer",
+  "kind": "worker",
+  "input": {
+    "type": "object",
+    "properties": {}
+  },
+  "output": {
+    "type": "object",
+    "required": ["files"],
+    "properties": {
+      "files": { "type": "array", "maxItems": 50, "items": { "type": "string", "maxLength": 200 } }
+    }
+  },
+  "rights": {
+    "read": ["**"],
+    "tools": ["find_files", "grep", "list_files"]
+  }
+}

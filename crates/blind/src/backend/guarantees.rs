@@ -37,7 +37,8 @@ async fn backend_answering(response: ResponseTemplate) -> (MockServer, Backend) 
         .mount(&server)
         .await;
     let client = OpenAiCompatible::new(&server.uri(), None);
-    let backend = Backend::start(client, "glm-5.3".to_owned()).expect("backend starts");
+    let backend =
+        Backend::start(client, "glm-5.3".to_owned(), "no agents").expect("backend starts");
     (server, backend)
 }
 

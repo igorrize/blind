@@ -12,7 +12,7 @@ use super::theme::Theme;
 const POINTER: &str = "› ";
 const NO_POINTER: &str = "  ";
 
-const SECTIONS: [Section; 3] = [
+const SECTIONS: [Section; 4] = [
     Section {
         title: "AGENTS",
         items: &[Item::Opens(Tab::Root)],
@@ -26,6 +26,10 @@ const SECTIONS: [Section; 3] = [
             Item::Planned("contracts"),
             Item::Opens(Tab::Settings),
         ],
+    },
+    Section {
+        title: "RUNS",
+        items: &[Item::Opens(Tab::Chain)],
     },
     Section {
         title: "SESSIONS",
@@ -131,6 +135,8 @@ mod tests {
             "WINDOWS",
             "approvals",
             "settings",
+            "RUNS",
+            "chain",
             "SESSIONS",
         ] {
             assert!(text.contains(expected), "missing {expected:?}");

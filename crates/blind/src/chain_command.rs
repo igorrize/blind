@@ -35,6 +35,10 @@ pub fn run(dir: &Path, project: &Path, names: &[String], task: &str) -> anyhow::
     Ok(report(outcome))
 }
 
+pub fn links(dir: &Path, project: &Path, names: &[String]) -> anyhow::Result<Vec<Link>> {
+    connect(load(dir, names)?, project)
+}
+
 fn load(dir: &Path, names: &[String]) -> anyhow::Result<Vec<Agent>> {
     names
         .iter()
@@ -96,7 +100,7 @@ fn report(outcome: ChainOutcome) -> ExitCode {
     }
 }
 
-fn explained(reason: &StopReason) -> String {
+pub fn explained(reason: &StopReason) -> String {
     match reason {
         StopReason::StepFailed(stop) => stop.explained().to_owned(),
         StopReason::InputRejected(violations) => {
@@ -106,11 +110,11 @@ fn explained(reason: &StopReason) -> String {
     }
 }
 
-fn step_line(record: &StepRecord) -> String {
+pub fn step_line(record: &StepRecord) -> String {
     format!("{} · {}", record.agent, record.report)
 }
 
-fn total_line(steps: &[StepRecord]) -> String {
+pub fn total_line(steps: &[StepRecord]) -> String {
     let usage = steps.iter().fold(Usage::default(), |total, step| {
         total.plus(step.report.usage)
     });

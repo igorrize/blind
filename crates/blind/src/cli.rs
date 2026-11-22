@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use blind_core::ModelRef;
 use clap::{Parser, Subcommand};
 
-const AGENTS_DIR: &str = ".blind/agents";
+pub const AGENTS_DIR: &str = ".blind/agents";
 const AGENTS_DIR_HELP: &str = "Folder with one subfolder per agent";
 const PROJECT_HELP: &str = "Project folder the agents may read, within their contract rights";
 

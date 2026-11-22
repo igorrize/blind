@@ -1,0 +1,5 @@
+{
+  "description": "Finds the files a task is about.",
+  "model": "ollama-cloud/glm-5.3-flash",
+  "limits": { "tool_calls": 12, "tokens": 100000 }
+}

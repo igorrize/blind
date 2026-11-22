@@ -14,8 +14,12 @@ use crate::runtime;
 mod guarantees;
 
 const ROOT_PROMPT: &str = "You are root, the conversational agent of the blind harness. \
-You only talk with the user: you cannot read files, run commands or call other agents yet. \
-Answer in the user's language.";
+You only talk with the user: you cannot read files, run commands or call other agents. \
+The harness tells you below which agents this project has. That is all you know about the project: \
+do not invent agents, contracts or file contents. \
+When the user runs a chain of agents, its result appears in the conversation after the mark \
+`[result of an agent chain the user ran]`. Answer in the user's language.";
+const CHAIN_RESULT: &str = "[result of an agent chain the user ran]";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BackendEvent {
@@ -24,6 +28,7 @@ pub enum BackendEvent {
 }
 
 pub struct Backend {
+    root_prompt: String,
     requests: Sender<Request>,
     events: Receiver<BackendEvent>,
 }
@@ -42,7 +47,7 @@ struct Worker {
 }
 
 impl Backend {
-    pub fn start(client: OpenAiCompatible, model: String) -> io::Result<Self> {
+    pub fn start(client: OpenAiCompatible, model: String, agents: &str) -> io::Result<Self> {
         let (requests, pending) = mpsc::channel();
         let (events, received) = mpsc::channel();
         let worker = Worker {
@@ -53,13 +58,14 @@ impl Backend {
         };
         thread::spawn(move || worker.serve(&pending));
         Ok(Self {
+            root_prompt: root_prompt(agents),
             requests,
             events: received,
         })
     }
 
     pub fn ask(&self, conversation: &Conversation) -> bool {
-        self.send(Request::Ask(messages(conversation)))
+        self.send(Request::Ask(messages(&self.root_prompt, conversation)))
     }
 
     pub fn list_models(&self) -> bool {
@@ -117,8 +123,12 @@ impl Worker {
     }
 }
 
-fn messages(conversation: &Conversation) -> Vec<Message> {
-    let system = Message::system(ROOT_PROMPT);
+fn root_prompt(agents: &str) -> String {
+    format!("{ROOT_PROMPT}\n\n{agents}")
+}
+
+fn messages(root_prompt: &str, conversation: &Conversation) -> Vec<Message> {
+    let system = Message::system(root_prompt);
     let spoken = conversation.entries().iter().map(message);
     std::iter::once(system).chain(spoken).collect()
 }
@@ -127,6 +137,7 @@ fn message(entry: &Entry) -> Message {
     match entry.speaker {
         Speaker::Human => Message::user(&entry.text),
         Speaker::Root => Message::assistant(&entry.text),
+        Speaker::Chain => Message::user(&format!("{CHAIN_RESULT}\n{}", entry.text)),
     }
 }
 
@@ -137,7 +148,7 @@ pub(crate) mod test_support {
 
     pub fn offline() -> Backend {
         let client = OpenAiCompatible::new("http://127.0.0.1:1", None);
-        Backend::start(client, "test-model".to_owned()).expect("backend starts")
+        Backend::start(client, "test-model".to_owned(), "no agents").expect("backend starts")
     }
 }
 
@@ -155,6 +166,7 @@ mod tests {
     use super::*;
 
     const PATIENCE: Duration = Duration::from_secs(5);
+    const AGENTS: &str = "## explorer\nFinds the files a task is about.";
 
     fn next_event(backend: &Backend) -> BackendEvent {
         backend
@@ -171,7 +183,7 @@ mod tests {
 
     fn backend_for(server: &MockServer) -> Backend {
         let client = OpenAiCompatible::new(&server.uri(), None);
-        Backend::start(client, "glm-5.3".to_owned()).expect("backend starts")
+        Backend::start(client, "glm-5.3".to_owned(), AGENTS).expect("backend starts")
     }
 
     fn one_word_answer() -> ResponseTemplate {
@@ -188,7 +200,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(body_partial_json(json!({"model": "glm-5.3", "messages": [
-                {"role": "system", "content": ROOT_PROMPT},
+                {"role": "system", "content": root_prompt(AGENTS)},
                 {"role": "user", "content": "hi"}
             ]})))
             .respond_with(one_word_answer())
@@ -256,15 +268,30 @@ mod tests {
     }
 
     #[test]
+    fn chain_result_reaches_root_as_a_marked_user_message() {
+        let mut conversation = Conversation::default();
+        conversation.delegate("check".to_owned());
+        conversation.report("explorer\n{}".to_owned());
+        assert_eq!(
+            messages("prompt", &conversation),
+            [
+                Message::system("prompt"),
+                Message::user("check"),
+                Message::user("[result of an agent chain the user ran]\nexplorer\n{}"),
+            ]
+        );
+    }
+
+    #[test]
     fn history_is_sent_as_alternating_user_and_assistant_messages() {
         let mut conversation = asked("one");
         conversation.receive(ReplyEvent::Text("first".to_owned()));
         conversation.receive(ReplyEvent::Done(Usage::default()));
         conversation.say("two".to_owned());
         assert_eq!(
-            messages(&conversation),
+            messages(&root_prompt(AGENTS), &conversation),
             [
-                Message::system(ROOT_PROMPT),
+                Message::system(&root_prompt(AGENTS)),
                 Message::user("one"),
                 Message::assistant("first"),
                 Message::user("two")

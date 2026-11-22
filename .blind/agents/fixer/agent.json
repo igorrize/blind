@@ -1,0 +1,4 @@
+{
+  "description": "Fixes the listed findings in the code.",
+  "model": "ollama-cloud/glm-5.3-flash"
+}

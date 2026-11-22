@@ -7,6 +7,7 @@ use ratatui::{
 };
 
 use super::theme::Theme;
+use super::wrap::{height_of, wrapped};
 use crate::model_catalog::Catalog;
 use crate::ui_config::Flavor;
 
@@ -15,7 +16,6 @@ const LOADING: &str = "loading models…";
 const POINTER: &str = "› ";
 const NO_POINTER: &str = "  ";
 const CURRENT_MARK: &str = "  ● current";
-const NOTICE_HEIGHT: u16 = 1;
 
 pub struct SettingsView<'a> {
     pub theme: Theme,
@@ -32,13 +32,13 @@ struct Listing {
 }
 
 impl SettingsView<'_> {
-    fn listing(&self) -> Listing {
+    fn listing(&self, width: usize) -> Listing {
         let mut lines = vec![Line::styled("Theme", self.theme.section_title())];
         lines.extend(self.flavor_rows());
         lines.push(Line::default());
         lines.push(Line::styled("Root model", self.theme.section_title()));
         let first_model_line = lines.len();
-        lines.extend(self.catalog_lines());
+        lines.extend(self.catalog_lines(width));
         Listing {
             lines,
             cursor_line: self.cursor_line(first_model_line),
@@ -60,13 +60,13 @@ impl SettingsView<'_> {
             .collect()
     }
 
-    fn catalog_lines(&self) -> Vec<Line<'static>> {
+    fn catalog_lines(&self, width: usize) -> Vec<Line<'static>> {
         match self.catalog {
             Catalog::NotLoaded | Catalog::Loading => {
                 vec![Line::styled(LOADING, self.theme.muted())]
             }
             Catalog::Failed(reason) => {
-                vec![Line::styled(format!("error  {reason}"), self.theme.error())]
+                wrapped(&format!("error  {reason}"), width, self.theme.error())
             }
             Catalog::Loaded(models) => self.model_rows(models),
         }
@@ -95,21 +95,26 @@ impl SettingsView<'_> {
         Line::styled(format!("{pointer}{label}{mark}"), style)
     }
 
-    fn notice_line(&self) -> Line<'static> {
-        Line::styled(self.notice.unwrap_or(HELP).to_owned(), self.theme.muted())
+    fn notice_lines(&self, width: u16) -> Vec<Line<'static>> {
+        let notice = self.notice.unwrap_or(HELP);
+        wrapped(notice, usize::from(width), self.theme.muted())
     }
 }
 
 impl Widget for SettingsView<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let block = self.theme.bordered(Borders::TOP);
-        let [list, notice] =
-            Layout::vertical([Constraint::Min(0), Constraint::Length(NOTICE_HEIGHT)])
-                .areas(block.inner(area));
-        let listing = self.listing();
+        let inner = block.inner(area);
+        let notice_lines = self.notice_lines(inner.width);
+        let [list, notice] = Layout::vertical([
+            Constraint::Min(0),
+            Constraint::Length(height_of(&notice_lines)),
+        ])
+        .areas(inner);
+        let listing = self.listing(usize::from(list.width));
         let hidden = first_visible(listing.cursor_line, usize::from(list.height));
         let visible: Vec<Line> = listing.lines.into_iter().skip(hidden).collect();
-        self.notice_line().render(notice, buf);
+        Paragraph::new(notice_lines).render(notice, buf);
         block.render(area, buf);
         Paragraph::new(visible).render(list, buf);
     }
@@ -178,6 +183,16 @@ mod tests {
         let catalog = Catalog::Failed("provider answered 401".to_owned());
         let text = view(&catalog, 0, None, 16);
         assert!(text.contains("error  provider answered 401"), "{text}");
+    }
+
+    #[test]
+    fn long_notice_and_error_are_wrapped() {
+        let catalog =
+            Catalog::Failed("provider answered 401: the key is missing or expired".to_owned());
+        let notice = "not saved: cannot write ~/.config/blind/ui.toml: permission denied";
+        let text = view(&catalog, 0, Some(notice), 16);
+        assert!(text.contains("expired"), "{text}");
+        assert!(text.contains("permission denied"), "{text}");
     }
 
     #[test]

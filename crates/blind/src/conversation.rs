@@ -4,6 +4,7 @@ use blind_core::Usage;
 pub enum Speaker {
     Human,
     Root,
+    Chain,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,11 +38,16 @@ pub struct Conversation {
 
 impl Conversation {
     pub fn say(&mut self, text: String) {
-        self.entries.push(Entry {
-            speaker: Speaker::Human,
-            text,
-        });
+        self.push(Speaker::Human, text);
         self.status = Status::Waiting;
+    }
+
+    pub fn delegate(&mut self, task: String) {
+        self.push(Speaker::Human, task);
+    }
+
+    pub fn report(&mut self, result: String) {
+        self.push(Speaker::Chain, result);
     }
 
     pub fn receive(&mut self, event: ReplyEvent) {
@@ -74,15 +80,17 @@ impl Conversation {
     fn append_reply(&mut self, text: &str) {
         if self.status == Status::Answering
             && let Some(reply) = self.entries.last_mut()
+            && reply.speaker == Speaker::Root
         {
             reply.text.push_str(text);
         } else {
-            self.entries.push(Entry {
-                speaker: Speaker::Root,
-                text: text.to_owned(),
-            });
+            self.push(Speaker::Root, text.to_owned());
         }
         self.status = Status::Answering;
+    }
+
+    fn push(&mut self, speaker: Speaker, text: String) {
+        self.entries.push(Entry { speaker, text });
     }
 }
 
@@ -175,5 +183,41 @@ mod tests {
             &Status::Failed("provider answered 401".to_owned())
         );
         assert!(!conversation.is_busy());
+    }
+
+    #[test]
+    fn delegated_task_is_shown_without_waiting_for_root() {
+        let mut conversation = Conversation::default();
+        conversation.delegate("check the loader".to_owned());
+        assert_eq!(texts(&conversation), [(Speaker::Human, "check the loader")]);
+        assert!(!conversation.is_busy());
+    }
+
+    #[test]
+    fn chain_report_is_its_own_entry() {
+        let mut conversation = Conversation::default();
+        conversation.delegate("check".to_owned());
+        conversation.report("explorer\n{}".to_owned());
+        assert_eq!(
+            texts(&conversation),
+            [(Speaker::Human, "check"), (Speaker::Chain, "explorer\n{}")]
+        );
+    }
+
+    #[test]
+    fn root_answer_never_continues_a_chain_report() {
+        let mut conversation = asked("hi");
+        conversation.receive(text("Hel"));
+        conversation.report("explorer\n{}".to_owned());
+        conversation.receive(text("lo"));
+        assert_eq!(
+            texts(&conversation),
+            [
+                (Speaker::Human, "hi"),
+                (Speaker::Root, "Hel"),
+                (Speaker::Chain, "explorer\n{}"),
+                (Speaker::Root, "lo"),
+            ]
+        );
     }
 }

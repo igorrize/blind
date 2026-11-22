@@ -9,6 +9,11 @@ pub enum Action {
     Up,
     Down,
     Back,
+    SwitchTarget,
+    PageUp,
+    PageDown,
+    Home,
+    End,
     Insert(char),
 }
 
@@ -36,6 +41,11 @@ fn named_key(code: KeyCode) -> Option<Action> {
         (KeyCode::Up, Action::Up),
         (KeyCode::Down, Action::Down),
         (KeyCode::Esc, Action::Back),
+        (KeyCode::Tab, Action::SwitchTarget),
+        (KeyCode::PageUp, Action::PageUp),
+        (KeyCode::PageDown, Action::PageDown),
+        (KeyCode::Home, Action::Home),
+        (KeyCode::End, Action::End),
     ]
     .into_iter()
     .find_map(|(named, action)| (named == code).then_some(action))
@@ -96,12 +106,17 @@ mod tests {
         assert_eq!(action_for(plain(KeyCode::Up)), Some(Action::Up));
         assert_eq!(action_for(plain(KeyCode::Down)), Some(Action::Down));
         assert_eq!(action_for(plain(KeyCode::Esc)), Some(Action::Back));
+        assert_eq!(action_for(plain(KeyCode::Tab)), Some(Action::SwitchTarget));
+        assert_eq!(action_for(plain(KeyCode::PageUp)), Some(Action::PageUp));
+        assert_eq!(action_for(plain(KeyCode::PageDown)), Some(Action::PageDown));
+        assert_eq!(action_for(plain(KeyCode::Home)), Some(Action::Home));
+        assert_eq!(action_for(plain(KeyCode::End)), Some(Action::End));
     }
 
     #[test]
     fn other_shortcuts_and_keys_do_nothing() {
         assert_eq!(action_for(ctrl('y')), None);
-        assert_eq!(action_for(plain(KeyCode::Tab)), None);
+        assert_eq!(action_for(plain(KeyCode::F(5))), None);
     }
 
     #[test]
