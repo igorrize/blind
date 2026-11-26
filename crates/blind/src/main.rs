@@ -9,6 +9,7 @@ mod chain_run;
 mod cli;
 mod conversation;
 mod crew;
+mod lineup;
 mod model_catalog;
 mod model_list;
 mod providers;
@@ -20,6 +21,8 @@ mod session;
 mod step;
 mod tui;
 mod ui_config;
+mod workplace;
+mod worktree;
 
 use std::process::ExitCode;
 

@@ -1,0 +1,34 @@
+{
+  "name": "scout",
+  "kind": "worker",
+  "input": {
+    "type": "object",
+    "properties": {}
+  },
+  "output": {
+    "type": "object",
+    "required": [
+      "summary",
+      "files"
+    ],
+    "properties": {
+      "summary": {
+        "type": "string",
+        "maxLength": 3000
+      },
+      "files": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "maxItems": 20
+      }
+    }
+  },
+  "rights": {
+    "read": [
+      "**"
+    ]
+  }
+}

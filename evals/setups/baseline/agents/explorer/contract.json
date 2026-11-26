@@ -1,0 +1,19 @@
+{
+  "name": "explorer",
+  "kind": "worker",
+  "input": {
+    "type": "object",
+    "properties": {}
+  },
+  "output": {
+    "type": "object",
+    "required": ["files", "notes"],
+    "properties": {
+      "files": { "type": "array", "maxItems": 20, "items": { "type": "string", "maxLength": 200 } },
+      "notes": { "type": "string", "maxLength": 3000 }
+    }
+  },
+  "rights": {
+    "read": ["**"]
+  }
+}

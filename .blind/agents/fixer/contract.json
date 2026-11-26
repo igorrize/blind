@@ -3,20 +3,43 @@
   "kind": "worker",
   "input": {
     "type": "object",
-    "required": ["findings"],
+    "required": [
+      "findings"
+    ],
     "properties": {
-      "findings": { "type": "array", "maxItems": 100, "items": { "type": "string", "maxLength": 300 } }
+      "findings": {
+        "type": "array",
+        "maxItems": 100,
+        "items": {
+          "type": "string",
+          "maxLength": 300
+        }
+      }
     }
   },
   "output": {
     "type": "object",
-    "required": ["changed"],
+    "required": [
+      "changed"
+    ],
     "properties": {
-      "changed": { "type": "array", "maxItems": 50, "items": { "type": "string", "maxLength": 200 } }
+      "changed": {
+        "type": "array",
+        "maxItems": 50,
+        "items": {
+          "type": "string",
+          "maxLength": 200
+        }
+      }
     }
   },
   "rights": {
-    "read": ["src/**"],
-    "write": ["src/**"]
+    "read": [
+      "**"
+    ],
+    "write": [
+      "crates/**"
+    ],
+    "written_as": "changed"
   }
 }

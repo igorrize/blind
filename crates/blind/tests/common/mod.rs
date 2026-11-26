@@ -89,6 +89,31 @@ pub fn blind(workspace: &Path, arguments: &[&str]) -> Output {
         .expect("blind runs")
 }
 
+pub fn blind_in(workspace: &Path, project: &Path, copies: &Path, arguments: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_blind"))
+        .args(arguments)
+        .arg("--dir")
+        .arg(workspace.join("agents"))
+        .arg("--project")
+        .arg(project)
+        .env("XDG_CONFIG_HOME", workspace.join("config"))
+        .env("XDG_CACHE_HOME", copies)
+        .env(KEY_VARIABLE, "test-key")
+        .output()
+        .expect("blind runs")
+}
+
+pub fn calling(tool: &str, arguments: &Value) -> ResponseTemplate {
+    sse(&[json!({"choices": [{"delta": {"tool_calls": [{
+        "index": 0, "id": "call_1", "type": "function",
+        "function": {"name": tool, "arguments": arguments.to_string()}
+    }]}}]})])
+}
+
+pub fn stderr(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
 pub async fn request_texts(server: &MockServer) -> Vec<String> {
     let requests = server.received_requests().await.expect("recorded");
     requests

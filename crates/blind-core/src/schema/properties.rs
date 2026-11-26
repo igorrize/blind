@@ -5,7 +5,7 @@ use proptest::{
 };
 use serde_json::{Map, Value, json};
 
-use super::{ObjectSchema, Schema, Violation};
+use super::{ObjectSchema, Schema, Violation, merged_outputs};
 
 const UNDECLARED: &str = "undeclared";
 const DEFAULT_TEXT_LENGTH: usize = 12;
@@ -348,5 +348,53 @@ proptest! {
         (schema, value) in schema_with_conforming_value()
     ) {
         prop_assert_eq!(schema.project(&value), value);
+    }
+}
+
+fn list_schema() -> impl Strategy<Value = Value> {
+    (any_schema(), option::of(0u32..4)).prop_map(|(items, limit)| {
+        limited(json!({"type": "array", "items": items}), "maxItems", limit)
+    })
+}
+
+fn two_outputs_of(
+    pair: impl Strategy<Value = (Value, Value)>,
+) -> impl Strategy<Value = (ObjectSchema, ObjectSchema, Value, Value)> {
+    pair.prop_flat_map(|(first, second)| {
+        (
+            Just(parsed(&first)),
+            Just(parsed(&second)),
+            conforming(&first),
+            conforming(&second),
+        )
+    })
+}
+
+fn same_lists_twice() -> impl Strategy<Value = (ObjectSchema, ObjectSchema, Value, Value)> {
+    two_outputs_of(object_schema_of(list_schema()).prop_map(|schema| (schema.clone(), schema)))
+}
+
+fn any_two() -> impl Strategy<Value = (ObjectSchema, ObjectSchema, Value, Value)> {
+    two_outputs_of((object_schema(), object_schema()))
+}
+
+proptest! {
+    #[test]
+    fn outputs_of_the_same_lists_always_fit_the_joined_schema(
+        (first, second, first_value, second_value) in same_lists_twice()
+    ) {
+        let joined = first.merged_with(&second).expect("same lists always join");
+        let merged = merged_outputs(&[first_value, second_value]);
+        prop_assert_eq!(joined.violations(&merged), vec![]);
+    }
+
+    #[test]
+    fn merged_outputs_fit_whenever_the_schemas_join(
+        (first, second, first_value, second_value) in any_two()
+    ) {
+        if let Ok(joined) = first.merged_with(&second) {
+            let merged = merged_outputs(&[first_value, second_value]);
+            prop_assert_eq!(joined.violations(&merged), vec![]);
+        }
     }
 }

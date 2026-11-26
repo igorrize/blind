@@ -1,0 +1,10 @@
+{
+  "description": "The writer with a reviewer's contract: reads the changed files and judges them.",
+  "model": "ollama-cloud/glm-5.3-flash",
+  "limits": {
+    "tool_calls": 25
+  },
+  "rules": [
+    "rust"
+  ]
+}

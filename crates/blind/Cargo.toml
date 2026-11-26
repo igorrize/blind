@@ -15,6 +15,7 @@ blind-core = { path = "../blind-core" }
 blind-exec = { version = "0.0.1", path = "../blind-exec" }
 catppuccin = "2.9.1"
 clap = { version = "4.6.7", features = ["derive"] }
+futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 ratatui = "0.30.2"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json", "system-proxy"] }
 serde = { version = "1.0.229", features = ["derive"] }

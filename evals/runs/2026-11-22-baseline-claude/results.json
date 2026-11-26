@@ -1,0 +1,64 @@
+{
+  "scenario": "copy-blocks",
+  "setup": "baseline",
+  "base": "caeedbb",
+  "result_commit": "09dbe89",
+  "branch": "eval/copy-blocks-reference",
+  "runner": "claude-code",
+  "steps": [
+    {
+      "agent": "explorer",
+      "model": "sonnet",
+      "attempts": 3,
+      "rejections": [
+        "`notes` is 4347 characters, at most 3000 allowed",
+        "`notes` is 3110 characters, at most 3000 allowed"
+      ],
+      "tool_calls": 10,
+      "seconds": 96,
+      "tokens": 68322
+    },
+    {
+      "agent": "planner",
+      "model": "opus",
+      "attempts": 2,
+      "rejections": ["`steps[0]` is 405 characters, at most 400 allowed"],
+      "tool_calls": 18,
+      "seconds": 414,
+      "tokens": 119266
+    },
+    {
+      "agent": "coder",
+      "model": "opus",
+      "attempts": 2,
+      "rejections": ["`summary` is 3171 characters, at most 3000 allowed"],
+      "tool_calls": 54,
+      "seconds": 525,
+      "tokens": 154623,
+      "rights": {
+        "wrote_outside_write_rights": false,
+        "tried_to_run_a_command": 1,
+        "changed_matches_the_real_diff": true
+      }
+    },
+    {
+      "agent": "reviewer",
+      "model": "opus",
+      "attempts": 2,
+      "rejections": ["`findings[0]` is 425 characters, at most 400 allowed"],
+      "tool_calls": 16,
+      "seconds": 499,
+      "tokens": 74950,
+      "approved": false,
+      "findings": 3
+    }
+  ],
+  "checks": {
+    "fmt": true,
+    "clippy": true,
+    "tests": { "passed": 472, "failed": 0, "base_passed": 456 },
+    "acceptance": { "passed": 8, "failed": 0 }
+  },
+  "patch": { "files": 7, "added": 389, "removed": 5, "comment_lines": 0, "new_dependencies": 0 },
+  "judged": { "works_in_terminal": null, "rules_kept": null, "clipboard_decision": null }
+}

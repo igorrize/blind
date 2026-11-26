@@ -75,7 +75,7 @@ async fn serving_always(response: ResponseTemplate) -> MockServer {
 
 async fn run(server: &MockServer, agent: &Agent) -> (StepOutcome, Vec<String>) {
     let project = project();
-    let workspace = workspace_for(agent, project.path()).expect("workspace");
+    let workspace = workspace_for(agent, Ground::Project(project.path())).expect("workspace");
     let client = OpenAiCompatible::new(&server.uri(), None);
     let mut told = Vec::new();
     let mut record = |progress: Progress<'_>| {

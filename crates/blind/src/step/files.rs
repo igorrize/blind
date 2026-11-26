@@ -52,7 +52,7 @@ async fn serving_in_order(responses: Vec<ResponseTemplate>) -> MockServer {
 }
 
 async fn run(server: &MockServer, agent: &Agent, project: &TempDir) -> StepOutcome {
-    let workspace = workspace_for(agent, project.path()).expect("workspace");
+    let workspace = workspace_for(agent, Ground::Project(project.path())).expect("workspace");
     let client = OpenAiCompatible::new(&server.uri(), None);
     run_step(
         workspace.as_ref(),
@@ -194,7 +194,7 @@ fn reviewer() -> Agent {
 async fn review(server: &MockServer, project: &TempDir) -> StepOutcome {
     let agent = reviewer();
     let input = json!({"files": ["src/main.rs"]});
-    let workspace = workspace_for(&agent, project.path()).expect("workspace");
+    let workspace = workspace_for(&agent, Ground::Project(project.path())).expect("workspace");
     let client = OpenAiCompatible::new(&server.uri(), None);
     run_step(
         workspace.as_ref(),
@@ -260,7 +260,7 @@ async fn refused_call_is_reported_as_refused_not_as_done() {
     let server = serving_in_order(vec![wandering, allowed, calling(COMPLETE, FOUND)]).await;
     let agent = reviewer();
     let project = project();
-    let workspace = workspace_for(&agent, project.path()).expect("workspace");
+    let workspace = workspace_for(&agent, Ground::Project(project.path())).expect("workspace");
     let client = OpenAiCompatible::new(&server.uri(), None);
     let mut refusals = Vec::new();
     let mut record = |progress: Progress<'_>| {
@@ -296,21 +296,21 @@ async fn agent_limited_to_given_files_can_still_search_wider() {
 }
 
 #[test]
-fn agent_that_asks_for_write_rights_is_not_run() {
+fn agent_that_writes_gets_no_workspace_in_the_project_itself() {
     let fixer = explorer(r#"{"read":["src/**"],"write":["src/**"]}"#);
-    let refused = workspace_for(&fixer, project().path())
+    let refused = workspace_for(&fixer, Ground::Project(project().path()))
         .err()
         .expect("must be refused");
     assert_eq!(
         refused.to_string(),
-        "agent `explorer` asks for write rights, which blind cannot grant yet"
+        "agent `explorer` writes files, and agents may write only in a copy of the project"
     );
 }
 
 #[test]
 fn agent_without_read_rights_gets_no_workspace() {
     assert!(
-        workspace_for(&explorer("{}"), project().path())
+        workspace_for(&explorer("{}"), Ground::Project(project().path()))
             .expect("ok")
             .is_none()
     );

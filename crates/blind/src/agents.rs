@@ -1,8 +1,15 @@
-use std::{fs, io, path::Path};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+};
 
 use blind_core::{
-    Agent, AgentError, AgentName, CONTRACT_FILE, InvalidAgentName, PROMPT_FILE, SETTINGS_FILE,
+    Agent, AgentError, AgentName, CONTRACT_FILE, InvalidAgentName, PROMPT_FILE, RootAgent,
+    RuleName, SETTINGS_FILE,
 };
+
+const RULES_FOLDER: &str = "rules";
+const RULE_EXTENSION: &str = "md";
 
 pub struct Loaded {
     pub folder: String,
@@ -26,6 +33,12 @@ pub enum LoadError {
     BadRights(#[from] blind_exec::PolicyError),
     #[error("folder is `{folder}` but {file} names the agent `{name}`", file = CONTRACT_FILE)]
     NameMismatch { folder: String, name: String },
+    #[error("rule `{name}`: cannot read {path}: {source}")]
+    UnreadableRule {
+        name: RuleName,
+        path: String,
+        source: io::Error,
+    },
 }
 
 pub fn load_all(dir: &Path) -> io::Result<Vec<Loaded>> {
@@ -40,7 +53,7 @@ pub fn load_one(dir: &Path, name: &str) -> Result<Agent, LoadError> {
     if !is_real_folder(&folder) {
         return Err(LoadError::NoSuchFolder(name.as_str().to_owned()));
     }
-    load_agent(&folder, name.as_str())
+    load_agent(&folder, name.as_str(), &rules_folder(dir))
 }
 
 fn is_real_folder(path: &Path) -> bool {
@@ -61,15 +74,36 @@ fn agent_folders(dir: &Path) -> io::Result<Vec<String>> {
 fn load(dir: &Path, folder: &str) -> Loaded {
     Loaded {
         folder: folder.to_owned(),
-        outcome: load_agent(&dir.join(folder), folder),
+        outcome: load_agent(&dir.join(folder), folder, &rules_folder(dir)),
     }
 }
 
-fn load_agent(path: &Path, folder: &str) -> Result<Agent, LoadError> {
+pub fn load_root(dir: &Path) -> Result<Option<RootAgent>, LoadError> {
+    if !is_real_folder(dir) {
+        return Ok(None);
+    }
+    let contract = read(dir, CONTRACT_FILE)?;
+    let settings = read(dir, SETTINGS_FILE)?;
+    let prompt = read(dir, PROMPT_FILE)?;
+    let root = RootAgent::from_parts(&contract, &settings, prompt)?;
+    let texts = rule_texts(&rules_folder(dir), root.rules())?;
+    Ok(Some(root.with_rules(&texts)))
+}
+
+fn rules_folder(agents_dir: &Path) -> PathBuf {
+    agents_dir
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .join(RULES_FOLDER)
+}
+
+fn load_agent(path: &Path, folder: &str, rules: &Path) -> Result<Agent, LoadError> {
     let contract = read(path, CONTRACT_FILE)?;
     let settings = read(path, SETTINGS_FILE)?;
     let prompt = read(path, PROMPT_FILE)?;
     let agent = Agent::from_parts(&contract, &settings, prompt)?;
+    let texts = rule_texts(rules, agent.settings().rules())?;
+    let agent = agent.with_rules(&texts);
     blind_exec::check_patterns(agent.contract().rights().read())?;
     blind_exec::check_patterns(agent.contract().rights().write())?;
     let name = agent.contract().name().as_str();
@@ -81,6 +115,19 @@ fn load_agent(path: &Path, folder: &str) -> Result<Agent, LoadError> {
             name: name.to_owned(),
         })
     }
+}
+
+fn rule_texts(rules: &Path, names: &[RuleName]) -> Result<Vec<String>, LoadError> {
+    names.iter().map(|name| rule_text(rules, name)).collect()
+}
+
+fn rule_text(rules: &Path, name: &RuleName) -> Result<String, LoadError> {
+    let path = rules.join(name.as_str()).with_extension(RULE_EXTENSION);
+    fs::read_to_string(&path).map_err(|source| LoadError::UnreadableRule {
+        name: name.clone(),
+        path: path.display().to_string(),
+        source,
+    })
 }
 
 fn read(path: &Path, file: &'static str) -> Result<String, LoadError> {
@@ -204,6 +251,83 @@ mod tests {
         assert_eq!(
             refusal(dir.path(), "ghost"),
             "there is no agent folder `ghost`"
+        );
+    }
+
+    fn agent_following(dir: &Path, rules: &str) -> PathBuf {
+        let agents = dir.join("agents");
+        fs::create_dir(&agents).expect("agents");
+        write_agent(&agents, "explorer", "explorer");
+        let settings =
+            format!(r#"{{"description":"Does one job.","model":"local/tiny","rules":{rules}}}"#);
+        fs::write(agents.join("explorer").join(SETTINGS_FILE), settings).expect("settings");
+        agents
+    }
+
+    #[test]
+    fn rules_are_read_from_the_folder_next_to_the_agents_and_follow_the_prompt() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let agents = agent_following(dir.path(), r#"["rust"]"#);
+        fs::create_dir(dir.path().join("rules")).expect("rules");
+        fs::write(dir.path().join("rules/rust.md"), "# Rust\nNo comments.\n").expect("rule");
+        let agent = load_one(&agents, "explorer").expect("valid agent");
+        assert_eq!(agent.prompt(), "Do the job.\n\n# Rust\nNo comments.\n");
+    }
+
+    #[test]
+    fn missing_rule_file_is_reported_by_name() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let agents = agent_following(dir.path(), r#"["rust"]"#);
+        let refused = refusal(&agents, "explorer");
+        assert!(
+            refused.starts_with("rule `rust`: cannot read "),
+            "{refused}"
+        );
+        assert!(refused.contains("rules/rust.md"), "{refused}");
+    }
+
+    fn write_root(dir: &Path, contract: &str) {
+        let root = dir.join("root");
+        fs::create_dir(&root).expect("root");
+        fs::write(root.join(CONTRACT_FILE), contract).expect("contract");
+        fs::write(root.join(SETTINGS_FILE), r#"{"description":"Talks."}"#).expect("settings");
+        fs::write(root.join(PROMPT_FILE), "Keep answers short.").expect("prompt");
+    }
+
+    #[test]
+    fn root_is_loaded_from_its_own_folder() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        write_root(
+            dir.path(),
+            r#"{"name":"root","kind":"root","input":{"type":"object","properties":{"summary":{"type":"string"}}}}"#,
+        );
+        let root = load_root(&dir.path().join("root"))
+            .expect("valid root")
+            .expect("root is there");
+        assert!(root.contract().input().declares("summary"));
+    }
+
+    #[test]
+    fn missing_root_folder_means_no_root_contract() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        assert!(
+            load_root(&dir.path().join("root"))
+                .expect("no error")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn broken_root_is_an_error_and_not_silently_skipped() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        write_root(
+            dir.path(),
+            r#"{"name":"root","kind":"worker","input":{"type":"object","properties":{}},"output":{"type":"object","properties":{}}}"#,
+        );
+        let error = load_root(&dir.path().join("root")).expect_err("must be refused");
+        assert_eq!(
+            error.to_string(),
+            "contract.json: `root` is a worker contract, not root"
         );
     }
 

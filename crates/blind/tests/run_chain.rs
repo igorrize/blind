@@ -113,3 +113,51 @@ async fn failed_last_step_prints_nothing_even_though_earlier_steps_passed() {
     assert_eq!(stdout(&output), "");
     assert_eq!(request_texts(&server).await.len(), 1 + TURN_LIMIT);
 }
+
+#[tokio::test]
+async fn plus_joins_agents_into_one_step_and_the_check_shows_them_side_by_side() {
+    let server = model_answering(completing(REVIEWED)).await;
+    let output = chain_check(
+        &two_agents(&server.uri()),
+        &["explorer", "reviewer+reviewer"],
+    );
+    assert!(output.status.success());
+    assert_eq!(stdout(&output), "ok: explorer → reviewer + reviewer\n");
+    assert!(request_texts(&server).await.is_empty());
+}
+
+#[tokio::test]
+async fn agents_that_give_the_same_text_field_cannot_run_side_by_side() {
+    let server = model_answering(completing(EXPLORED)).await;
+    let workspace = two_agents(&server.uri());
+    for refused in [
+        chain_check(&workspace, &["explorer+explorer"]),
+        chain_run(&workspace, &["explorer+explorer"]),
+    ] {
+        assert!(!refused.status.success());
+        assert_eq!(stdout(&refused), "");
+        let reason = String::from_utf8_lossy(&refused.stderr);
+        assert!(reason.contains("cannot run beside `explorer`"), "{reason}");
+    }
+    assert!(request_texts(&server).await.is_empty());
+}
+
+#[tokio::test]
+async fn results_of_agents_working_side_by_side_are_joined() {
+    let server = model_answering_in_order(vec![completing(EXPLORED)]).await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .respond_with(completing(REVIEWED))
+        .mount(&server)
+        .await;
+    let output = chain_run(
+        &two_agents(&server.uri()),
+        &["explorer", "reviewer+reviewer"],
+    );
+    assert!(output.status.success());
+    let printed: Value = serde_json::from_str(&stdout(&output)).expect("stdout is JSON");
+    assert_eq!(
+        printed,
+        json!({"findings": ["unused import", "unused import"]})
+    );
+    assert_eq!(request_texts(&server).await.len(), 3);
+}

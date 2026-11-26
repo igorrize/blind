@@ -15,10 +15,18 @@ pub enum Violation {
         path: String,
         expected: &'static str,
     },
-    #[error("`{path}` is longer than {limit} characters")]
-    TooLong { path: String, limit: u32 },
-    #[error("`{path}` has more than {limit} items")]
-    TooMany { path: String, limit: u32 },
+    #[error("`{path}` is {length} characters, at most {limit} allowed")]
+    TooLong {
+        path: String,
+        length: usize,
+        limit: u32,
+    },
+    #[error("`{path}` has {count} items, at most {limit} allowed")]
+    TooMany {
+        path: String,
+        count: usize,
+        limit: u32,
+    },
     #[error("`{0}` is outside the allowed range")]
     OutOfRange(String),
 }
@@ -59,9 +67,11 @@ impl Schema {
                 let Value::String(text) = value else {
                     return wrong_type(path, "a string");
                 };
-                match exceeded(text.chars().count(), *max_length) {
+                let length = text.chars().count();
+                match exceeded(length, *max_length) {
                     Some(limit) => vec![Violation::TooLong {
                         path: path.to_owned(),
+                        length,
                         limit,
                     }],
                     None => Vec::new(),
@@ -93,6 +103,7 @@ impl Schema {
                 let too_many =
                     exceeded(elements.len(), *max_items).map(|limit| Violation::TooMany {
                         path: path.to_owned(),
+                        count: elements.len(),
                         limit,
                     });
                 let inside = elements
@@ -182,8 +193,8 @@ mod tests {
         assert_eq!(
             problems(&value),
             [
-                "`findings` has more than 2 items",
-                "`findings[]` is longer than 5 characters",
+                "`findings` has 3 items, at most 2 allowed",
+                "`findings[]` is 7 characters, at most 5 allowed",
                 "`line` is outside the allowed range"
             ]
         );

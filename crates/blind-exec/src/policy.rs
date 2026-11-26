@@ -12,6 +12,7 @@ const PROTECTED: [&str; 9] = [
     "**/id_ed25519*",
 ];
 const SEPARATOR: char = '/';
+const EXCLUDING: char = '!';
 const HERE: &str = ".";
 const PARENT: &str = "..";
 
@@ -20,6 +21,7 @@ pub struct ProjectPath(String);
 
 pub struct PathPolicy {
     allowed: GlobSet,
+    excluded: GlobSet,
     protected: GlobSet,
 }
 
@@ -31,8 +33,12 @@ pub enum Refusal {
     Protected(String),
     #[error("`{0}` is outside the paths this agent may read")]
     OutOfScope(String),
+    #[error("`{0}` is excluded from the paths this agent may read")]
+    Excluded(String),
     #[error("`{0}` is not among the files given to this agent")]
     NotGiven(String),
+    #[error("`{0}` is outside the paths this agent may write")]
+    NotWritable(String),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -61,10 +67,14 @@ impl ProjectPath {
 
 impl PathPolicy {
     pub fn reading(patterns: &[String]) -> Result<Self, PolicyError> {
-        let allowed = patterns.iter().map(|raw| pattern(raw));
-        let protected = PROTECTED.iter().map(|raw| protected_pattern(raw));
+        let (excluding, including): (Vec<&String>, Vec<&String>) =
+            patterns.iter().partition(|raw| raw.starts_with(EXCLUDING));
+        let allowed = including.into_iter().map(|raw| pattern(raw));
+        let excluded = excluding.into_iter().map(|raw| exclusion(raw));
+        let protected = PROTECTED.iter().map(|raw| any_case_pattern(raw));
         Ok(Self {
             allowed: glob_set(allowed)?,
+            excluded: glob_set(excluded)?,
             protected: glob_set(protected)?,
         })
     }
@@ -77,6 +87,9 @@ impl PathPolicy {
         if !self.allowed.is_match(path.as_str()) {
             return Err(Refusal::OutOfScope(shown()));
         }
+        if self.excluded.is_match(path.as_str()) {
+            return Err(Refusal::Excluded(shown()));
+        }
         Ok(())
     }
 }
@@ -88,7 +101,15 @@ pub fn pattern(raw: &str) -> Result<Glob, PolicyError> {
     built(GlobBuilder::new(raw).literal_separator(true), raw)
 }
 
-fn protected_pattern(raw: &str) -> Result<Glob, PolicyError> {
+fn exclusion(raw: &str) -> Result<Glob, PolicyError> {
+    let excluded = raw.trim_start_matches(EXCLUDING);
+    if parts_inside_project(excluded).is_none() {
+        return Err(PolicyError::OutsideProject(raw.to_owned()));
+    }
+    any_case_pattern(excluded)
+}
+
+fn any_case_pattern(raw: &str) -> Result<Glob, PolicyError> {
     let any_case = GlobBuilder::new(raw)
         .literal_separator(true)
         .case_insensitive(true)
@@ -224,6 +245,66 @@ mod tests {
         }
     }
 
+    #[test]
+    fn excluded_paths_are_refused_inside_the_scope() {
+        let policy = only(&["crates/**", "!crates/**/tests.rs"]);
+        assert_eq!(verdict(&policy, "crates/blind/src/step.rs"), Ok(()));
+        assert_eq!(
+            verdict(&policy, "crates/blind/src/step/tests.rs"),
+            Err(Refusal::Excluded(
+                "crates/blind/src/step/tests.rs".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn exclusion_ignores_letter_case_because_the_file_system_does() {
+        let policy = only(&["crates/**", "!crates/**/tests.rs"]);
+        for raw in ["crates/a/TESTS.rs", "crates/a/Tests.RS"] {
+            assert!(
+                matches!(verdict(&policy, raw), Err(Refusal::Excluded(_))),
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn order_of_patterns_does_not_matter() {
+        let first = only(&["!docs/**", "**"]);
+        let second = only(&["**", "!docs/**"]);
+        for raw in ["docs/DESIGN.md", "src/main.rs"] {
+            assert_eq!(verdict(&first, raw), verdict(&second, raw), "{raw}");
+        }
+    }
+
+    #[test]
+    fn exclusions_alone_permit_nothing() {
+        assert!(matches!(
+            verdict(&only(&["!docs/**"]), "src/main.rs"),
+            Err(Refusal::OutOfScope(_))
+        ));
+    }
+
+    #[test]
+    fn exclusion_must_name_a_pattern_inside_the_project() {
+        for raw in ["!", "!!", "!../secrets/**", "!/etc/**"] {
+            let rejected = PathPolicy::reading(&["**".to_owned(), raw.to_owned()]);
+            assert!(
+                matches!(rejected, Err(PolicyError::OutsideProject(ref shown)) if shown == raw),
+                "{raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn exclusion_cannot_open_a_protected_path() {
+        let policy = only(&["**", "!src/**"]);
+        assert!(matches!(
+            verdict(&policy, ".env"),
+            Err(Refusal::Protected(_))
+        ));
+    }
+
     proptest! {
         #[test]
         fn parsed_path_never_leaves_the_project(raw in ".{0,40}") {
@@ -241,6 +322,19 @@ mod tests {
         ) {
             let raw = format!("{prefix}{folder}/{rest}");
             prop_assert!(verdict(&everything(), &raw).is_err());
+        }
+
+        #[test]
+        fn nothing_under_an_excluded_folder_is_ever_permitted(
+            folder in "[a-z]{1,6}",
+            rest in "[a-zA-Z]{1,6}(/[a-zA-Z]{1,6}){0,2}",
+        ) {
+            let excluded = format!("!{folder}/**");
+            let policy = only(&["**", &excluded]);
+            let inside = format!("{folder}/{rest}");
+            if let Ok(path) = ProjectPath::parse(&inside) {
+                prop_assert!(policy.permits(&path).is_err());
+            }
         }
 
         #[test]

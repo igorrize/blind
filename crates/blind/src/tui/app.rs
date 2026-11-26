@@ -8,6 +8,7 @@ use crate::chain_backend::ChainBackend;
 use crate::chain_log::{ChainLog, RunEvent};
 use crate::conversation::{Conversation, ReplyEvent};
 use crate::crew::{Candidate, Crew};
+use crate::lineup::Lineup;
 use crate::model_catalog::Catalog;
 use crate::root_model::RootModel;
 use crate::ui_config::{Flavor, UiSettings};
@@ -16,6 +17,7 @@ const LINK_CLOSED: &str = "the connection to the model is closed, restart blind"
 const RELOAD_KEY: char = 'r';
 const SIDEBAR_KEY: char = 's';
 const CHAIN_KEY: char = 'c';
+const BESIDE_KEY: char = '+';
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Flow {
@@ -41,8 +43,10 @@ pub struct App {
     pub(super) awaiting_command: bool,
     pub(super) sidebar_cursor: Option<Tab>,
     pub(super) notice: Option<String>,
-    pub(super) chain: Vec<String>,
-    pub(super) building: Option<Vec<String>>,
+    pub(super) chain: Lineup,
+    pub(super) building: Option<Lineup>,
+    pub(super) beside: bool,
+    pub(super) builder_notice: Option<String>,
     pub(super) sending_to_chain: bool,
     pub(super) chain_log: ChainLog,
     pub(super) chat_scroll: Scroll,
@@ -97,8 +101,10 @@ impl App {
             awaiting_command: false,
             sidebar_cursor: None,
             notice: None,
-            chain: Vec::new(),
+            chain: Lineup::default(),
             building: None,
+            beside: false,
+            builder_notice: None,
             sending_to_chain: false,
             chain_log: ChainLog::default(),
             chat_scroll: Scroll::default(),
@@ -110,8 +116,9 @@ impl App {
     }
 
     pub fn candidates(&self) -> Vec<Candidate> {
-        let chain = self.building.as_deref().unwrap_or_default();
-        self.crew.candidates(chain)
+        let empty = Lineup::default();
+        let lineup = self.building.as_ref().unwrap_or(&empty);
+        self.crew.candidates(lineup, self.beside)
     }
 
     pub fn receive_events(&mut self) {
@@ -128,8 +135,13 @@ impl App {
 
     fn chain_moved(&mut self, event: RunEvent) {
         if let Some(verdict) = event.verdict() {
-            let report = format!("{}\n{verdict}", self.chain_log.title());
-            self.conversation.report(report);
+            let parts = [
+                Some(self.chain_log.title()),
+                Some(&verdict),
+                self.chain_log.changes(),
+            ];
+            let report: Vec<&str> = parts.into_iter().flatten().collect();
+            self.conversation.report(report.join("\n"));
         }
         self.chain_log.receive(event);
     }
@@ -186,11 +198,18 @@ impl App {
     }
 
     fn act_in_builder(&mut self, action: Action) {
+        self.builder_notice = None;
         match action {
+            Action::Insert(BESIDE_KEY) => {
+                self.beside = self
+                    .building
+                    .as_ref()
+                    .is_some_and(|lineup| !lineup.is_empty())
+            }
             Action::Insert(key) => self.add_step(key),
             Action::DeleteBack => self.remove_last_step(),
             Action::Submit => self.use_built_chain(),
-            Action::Back => self.building = None,
+            Action::Back => self.close_builder(),
             Action::Up
             | Action::Down
             | Action::PageUp
@@ -204,26 +223,42 @@ impl App {
     }
 
     fn add_step(&mut self, key: char) {
-        let Some(chain) = self.building.as_mut() else {
+        let Some(lineup) = self.building.as_mut() else {
             return;
         };
         let number = key
             .to_digit(10)
             .and_then(|digit| usize::try_from(digit).ok());
-        if let Some(agent) = number.and_then(|number| self.crew.pick(chain, number)) {
-            chain.push(agent);
+        let picked = number.and_then(|number| self.crew.pick(lineup, self.beside, number));
+        if let Some(agent) = picked {
+            lineup.add(agent, self.beside);
+            self.beside = false;
         }
     }
 
     fn remove_last_step(&mut self) {
-        if let Some(chain) = self.building.as_mut() {
-            chain.pop();
+        if self.beside {
+            self.beside = false;
+        } else if let Some(lineup) = self.building.as_mut() {
+            lineup.pop();
         }
     }
 
     fn use_built_chain(&mut self) {
-        self.chain = self.building.take().unwrap_or_default();
+        let lineup = self.building.clone().unwrap_or_default();
+        if let Some(problem) = self.crew.delivery_problem(&lineup) {
+            self.builder_notice = Some(problem);
+            return;
+        }
+        self.chain = lineup;
+        self.close_builder();
         self.sending_to_chain = !self.chain.is_empty();
+    }
+
+    fn close_builder(&mut self) {
+        self.building = None;
+        self.beside = false;
+        self.builder_notice = None;
     }
 
     fn act_in_sidebar(&mut self, cursor: Tab, action: Action) {
@@ -411,7 +446,7 @@ mod tests {
     use crate::chain_backend::test_support::unable_to_run;
     use crate::chain_log::Kind;
     use crate::conversation::Speaker;
-    use crate::crew::test_support::explorer_planner_reviewer;
+    use crate::crew::test_support::{explorer_planner_reviewer, root};
     use crate::root_model::test_support::saved_in;
     use crate::tui::keys::test_support::{ctrl, letter, plain};
 
@@ -617,6 +652,10 @@ mod tests {
         app
     }
 
+    fn building(app: &App) -> Option<String> {
+        app.building.as_ref().map(ToString::to_string)
+    }
+
     fn fitting(app: &App) -> Vec<String> {
         let candidates = app.candidates();
         let fitting = candidates
@@ -629,7 +668,7 @@ mod tests {
     fn ctrl_x_c_opens_the_chain_builder_with_the_agents_that_can_go_first() {
         let dir = tempfile::tempdir().expect("temp dir");
         let app = built(&dir, &[]);
-        assert_eq!(app.building.as_deref(), Some(&[][..]));
+        assert_eq!(building(&app).as_deref(), Some(""));
         assert_eq!(fitting(&app), ["explorer", "planner"]);
     }
 
@@ -637,7 +676,7 @@ mod tests {
     fn number_adds_a_step_and_the_candidates_follow_the_contracts() {
         let dir = tempfile::tempdir().expect("temp dir");
         let app = built(&dir, &[letter('1')]);
-        assert_eq!(app.building.as_deref(), Some(&["explorer".to_owned()][..]));
+        assert_eq!(building(&app).as_deref(), Some("explorer"));
         assert_eq!(fitting(&app), ["explorer", "planner", "reviewer"]);
     }
 
@@ -645,7 +684,7 @@ mod tests {
     fn agent_that_does_not_fit_cannot_be_added() {
         let dir = tempfile::tempdir().expect("temp dir");
         let app = built(&dir, &[letter('3'), letter('9'), letter('x')]);
-        assert_eq!(app.building.as_deref(), Some(&[][..]));
+        assert_eq!(building(&app).as_deref(), Some(""));
         assert_eq!(app.draft.text(), "");
     }
 
@@ -653,7 +692,7 @@ mod tests {
     fn backspace_removes_the_last_step() {
         let dir = tempfile::tempdir().expect("temp dir");
         let app = built(&dir, &[letter('1'), letter('3'), plain(KeyCode::Backspace)]);
-        assert_eq!(app.building.as_deref(), Some(&["explorer".to_owned()][..]));
+        assert_eq!(building(&app).as_deref(), Some("explorer"));
     }
 
     #[test]
@@ -661,7 +700,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let app = built(&dir, &[letter('1'), letter('3'), plain(KeyCode::Enter)]);
         assert_eq!(app.building, None);
-        assert_eq!(app.chain, ["explorer", "reviewer"]);
+        assert_eq!(app.chain.to_string(), "explorer → reviewer");
         assert!(app.sending_to_chain);
     }
 
@@ -674,7 +713,7 @@ mod tests {
             &[ctrl('x'), letter('c'), letter('3'), plain(KeyCode::Esc)],
         );
         assert_eq!(app.building, None);
-        assert_eq!(app.chain, ["explorer"]);
+        assert_eq!(app.chain.to_string(), "explorer");
     }
 
     #[test]
@@ -682,7 +721,74 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let mut app = built(&dir, &[letter('1'), plain(KeyCode::Enter)]);
         press_all(&mut app, &[ctrl('x'), letter('c')]);
-        assert_eq!(app.building.as_deref(), Some(&["explorer".to_owned()][..]));
+        assert_eq!(building(&app).as_deref(), Some("explorer"));
+    }
+
+    #[test]
+    fn plus_then_a_number_puts_the_agent_beside_the_last_step() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let app = built(&dir, &[letter('1'), letter('3'), letter('+')]);
+        assert!(app.beside);
+        assert_eq!(fitting(&app), ["explorer", "planner", "reviewer"]);
+        let mut app = app;
+        press_all(&mut app, &[letter('2')]);
+        assert_eq!(
+            building(&app).as_deref(),
+            Some("explorer → reviewer + planner")
+        );
+        assert!(!app.beside);
+    }
+
+    #[test]
+    fn plus_does_nothing_before_the_first_step() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let app = built(&dir, &[letter('+'), letter('1')]);
+        assert!(!app.beside);
+        assert_eq!(building(&app).as_deref(), Some("explorer"));
+    }
+
+    #[test]
+    fn backspace_first_cancels_the_plus_then_removes_agents_one_by_one() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut app = built(&dir, &[letter('1'), letter('3'), letter('+'), letter('2')]);
+        press_all(&mut app, &[letter('+'), plain(KeyCode::Backspace)]);
+        assert!(!app.beside);
+        assert_eq!(
+            building(&app).as_deref(),
+            Some("explorer → reviewer + planner")
+        );
+        press_all(&mut app, &[plain(KeyCode::Backspace)]);
+        assert_eq!(building(&app).as_deref(), Some("explorer → reviewer"));
+    }
+
+    #[test]
+    fn closing_the_builder_forgets_a_pending_plus() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut app = built(&dir, &[letter('1'), letter('+'), plain(KeyCode::Esc)]);
+        press_all(&mut app, &[ctrl('x'), letter('c')]);
+        assert!(!app.beside);
+    }
+
+    #[test]
+    fn chain_whose_result_root_cannot_take_is_not_accepted() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let wants_text = root(r#"{"type":"object","properties":{"files":{"type":"string"}}}"#);
+        let mut app = app_with(&dir, explorer_planner_reviewer().with_root(wants_text));
+        press_all(
+            &mut app,
+            &[ctrl('x'), letter('c'), letter('1'), plain(KeyCode::Enter)],
+        );
+        assert_eq!(building(&app).as_deref(), Some("explorer"));
+        assert!(app.chain.is_empty());
+        let notice = app.builder_notice.clone().expect("a notice");
+        assert!(
+            notice.starts_with("root cannot take the result of `explorer`"),
+            "{notice}"
+        );
+        press_all(&mut app, &[letter('3')]);
+        assert_eq!(app.builder_notice, None);
+        press_all(&mut app, &[plain(KeyCode::Enter)]);
+        assert_eq!(app.chain.to_string(), "explorer → reviewer");
     }
 
     #[test]
@@ -740,6 +846,20 @@ mod tests {
         let report = app.conversation.entries().last().expect("a report");
         assert_eq!(report.speaker, Speaker::Chain);
         assert_eq!(report.text, "explorer\n{}");
+    }
+
+    #[test]
+    fn root_is_told_where_the_changes_of_a_chain_are() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut app = built(&dir, &[letter('1'), plain(KeyCode::Enter)]);
+        press_all(&mut app, &[letter('g'), plain(KeyCode::Enter)]);
+        app.chain_moved(RunEvent::Changes("changed: README.md".to_owned()));
+        app.chain_moved(RunEvent::Completed {
+            output: "{}".to_owned(),
+            total: "chain · steps: 1".to_owned(),
+        });
+        let report = app.conversation.entries().last().expect("a report");
+        assert_eq!(report.text, "explorer\n{}\nchanged: README.md");
     }
 
     #[test]

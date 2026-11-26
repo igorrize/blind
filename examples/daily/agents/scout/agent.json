@@ -1,0 +1,7 @@
+{
+  "description": "Collects what root needs to know about the project. Reads only.",
+  "model": "ollama-cloud/glm-5.3-flash",
+  "limits": {
+    "tool_calls": 20
+  }
+}

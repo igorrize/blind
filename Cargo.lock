@@ -262,6 +262,7 @@ dependencies = [
  "blind-exec",
  "catppuccin",
  "clap",
+ "futures-util",
  "proptest",
  "ratatui",
  "reqwest",

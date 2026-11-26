@@ -1,0 +1,19 @@
+{
+  "files": [
+    "crates/blind/src/conversation.rs",
+    "crates/blind/src/tui/app.rs",
+    "crates/blind/src/tui/keys.rs",
+    "crates/blind/src/tui.rs",
+    "crates/blind/src/tui/status_line.rs",
+    "crates/blind/src/session.rs",
+    "crates/blind/src/main.rs",
+    "README.md",
+    "crates/blind/tests/architecture.rs",
+    "crates/blind/src/backend.rs",
+    "crates/blind/src/tui/chat_view.rs",
+    "crates/blind/src/tui/settings_view.rs",
+    "crates/blind/Cargo.toml",
+    "evals/copy-blocks/README.md"
+  ],
+  "notes": "Rust workspace; crates/blind is the TUI binary. Code rules: no comments, small functions, one component per file, clippy -D warnings (workspace lints: unsafe_code forbid, clippy::all deny, wildcard_enum_match_arm deny, so matches on Action/Speaker/Status must list every variant). Tests sit next to code in `#[cfg(test)] mod tests`. Fixtures are `pub(crate) mod test_support` (e.g. backend::test_support::offline).\n\nconversation.rs: `entries: Vec<Entry{speaker: Speaker(Human|Root|Chain), text}>`, `status: Status(Idle|Waiting|Answering|Failed(String))`. `say` pushes Human and sets Waiting; `delegate` pushes Human without Waiting (chain task); `report` pushes Chain. `receive(Text)` appends to the last Root entry while Answering, else pushes a new Root entry, and sets Answering. `Done` gives Idle, `Failed` gives Failed and leaves a partial Root entry. Entry.text is the raw model text (labels and wrapping are added only in chat_view.rs), so last_answer and last_exchange belong here. A reply is unfinished while status is Answering. A Chain entry or delegated Human entry can sit between a prompt and its answer, so the planner must decide pairing. architecture.rs forbids std::fs and std::process in conversation.rs and backend.rs. Tests there use helpers asked/text/texts.\n\nKeys: tui/keys.rs maps KeyEvent to `Action`; 'y' and 'Y' arrive as Action::Insert(char). Ctrl-X gives Action::Leader. In tui/app.rs `App::handle` sets `awaiting_command`, then `run_command(action)` handles the next key (consts SIDEBAR_KEY 's', CHAIN_KEY 'c', digits via Tab::numbered). Add the copy keys there. `App.notice: Option<String>` exists but only settings_view shows it, and nothing clears it on a keypress. The new status message must appear in the status line and clear at the start of the next `handle`. App tests use `app(&dir)`, `app.handle(ctrl('x'))`, `letter('y')`.\n\nStatus line: tui/status_line.rs `StatusLine::new(model, usage, hint, theme)` picks text from width-based fallbacks. tui.rs `draw` builds it with `hint(app)`. Hint consts are in tui.rs: KEYS_HINT, READING_HINT, COMMAND_HINT = \"1 root · 2 settings · 3 chain · c build chain · s sidebar\" (shown after Ctrl-X; add y and Y here), BUILDER_HINT, SIDEBAR_HINT. tui.rs tests use `screen(app)` and `assert_shows`.\n\nClipboard: needs a new module outside tui/. tests/architecture.rs forbids std::process, std::fs, std::net, tokio, reqwest in tui/*.rs and tui.rs production code. So the pbcopy (or OSC 52) code must live in a top-level module, e.g. crates/blind/src/clipboard.rs, registered in main.rs `mod` list. Inject it via the `Services` struct (tui/app.rs: backend, chain_backend, crew), built in session.rs `run()` and in the tests of tui.rs and app.rs, which need updating. Add a fake in `clipboard::test_support`. pbcopy via std::process works inside zellij on macOS; OSC 52 depends on zellij passthrough. Cargo.toml has no clipboard crate. CI runs fmt, clippy and tests on ubuntu and macos.\n\nREADME.md line ~49 (`Keys in the TUI` paragraph) must get Ctrl-X y and Ctrl-X Y. Acceptance tests (later) call Conversation::last_answer and last_exchange."
+}

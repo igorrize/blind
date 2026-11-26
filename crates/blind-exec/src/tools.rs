@@ -38,9 +38,29 @@ struct ReadFile {
     last_line: Option<usize>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WriteFile {
+    path: String,
+    content: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EditFile {
+    path: String,
+    old: String,
+    new: String,
+}
+
+const WRITE_FILE: &str = "write_file";
+const EDIT_FILE: &str = "edit_file";
+
 impl Workspace {
     pub fn offered(&self) -> Vec<ToolDescription> {
-        self.tools().iter().map(|tool| described(*tool)).collect()
+        let reading = self.tools().iter().map(|tool| described(*tool));
+        let writing = self.can_write().then(writing_tools).unwrap_or_default();
+        reading.chain(writing).collect()
     }
 
     pub fn call(
@@ -49,6 +69,12 @@ impl Workspace {
         arguments: &str,
         given: Option<&[String]>,
     ) -> Option<Result<String, ToolError>> {
+        if self.can_write() && name == WRITE_FILE {
+            return Some(self.call_write_file(arguments));
+        }
+        if self.can_write() && name == EDIT_FILE {
+            return Some(self.call_edit_file(arguments));
+        }
         let allowed = self.tools().iter().copied();
         let tool = allowed.into_iter().find(|tool| tool.name() == name)?;
         Some(match tool {
@@ -57,6 +83,16 @@ impl Workspace {
             ReadingTool::ListFiles => self.call_list_files(arguments),
             ReadingTool::ReadFile => self.call_read_file(arguments, given),
         })
+    }
+
+    fn call_write_file(&self, arguments: &str) -> Result<String, ToolError> {
+        let wanted: WriteFile = parsed(arguments)?;
+        self.write_file(&wanted.path, &wanted.content)
+    }
+
+    fn call_edit_file(&self, arguments: &str) -> Result<String, ToolError> {
+        let wanted: EditFile = parsed(arguments)?;
+        self.edit_file(&wanted.path, &wanted.old, &wanted.new)
     }
 
     fn call_find_files(&self, arguments: &str) -> Result<String, ToolError> {
@@ -130,6 +166,35 @@ fn described(tool: ReadingTool) -> ToolDescription {
         description,
         parameters,
     }
+}
+
+fn writing_tools() -> Vec<ToolDescription> {
+    vec![
+        ToolDescription {
+            name: WRITE_FILE,
+            description: "Create a file or replace it whole with `content`. \
+                Missing folders are created. Use it for new files; to change part of \
+                an existing file use `edit_file`.",
+            parameters: object(
+                &["path", "content"],
+                json!({"path": {"type": "string"}, "content": {"type": "string"}}),
+            ),
+        },
+        ToolDescription {
+            name: EDIT_FILE,
+            description: "Replace one exact piece of text in a file. `old` must appear \
+                in the file exactly once, with the same spaces and line breaks: read the \
+                file first and copy it. Add neighbouring lines to `old` when it is not unique.",
+            parameters: object(
+                &["path", "old", "new"],
+                json!({
+                    "path": {"type": "string"},
+                    "old": {"type": "string"},
+                    "new": {"type": "string"}
+                }),
+            ),
+        },
+    ]
 }
 
 fn object(required: &[&str], properties: Value) -> Value {
@@ -232,6 +297,81 @@ mod tests {
             refused.to_string(),
             "`src/main.rs` is not among the files given to this agent"
         );
+    }
+
+    fn writer(dir: &TempDir) -> Workspace {
+        reading(dir, &["**"])
+            .writing(&["src/**".to_owned()])
+            .expect("valid write rights")
+    }
+
+    #[test]
+    fn writing_tools_are_offered_only_with_write_rights() {
+        let dir = sources();
+        let names = |workspace: &Workspace| -> Vec<&'static str> {
+            workspace.offered().iter().map(|tool| tool.name).collect()
+        };
+        assert_eq!(
+            names(&reading(&dir, &["**"])),
+            [FIND_FILES, GREP, LIST_FILES, READ_FILE]
+        );
+        assert_eq!(
+            names(&writer(&dir)),
+            [
+                FIND_FILES, GREP, LIST_FILES, READ_FILE, WRITE_FILE, EDIT_FILE
+            ]
+        );
+    }
+
+    #[test]
+    fn writing_tools_do_not_exist_without_write_rights() {
+        let dir = sources();
+        let reader = reading(&dir, &["**"]);
+        let write = r#"{"path":"src/main.rs","content":"changed"}"#;
+        let edit = r#"{"path":"src/main.rs","old":"main","new":"start"}"#;
+        assert!(reader.call(WRITE_FILE, write, None).is_none());
+        assert!(reader.call(EDIT_FILE, edit, None).is_none());
+        let on_disk = std::fs::read_to_string(dir.path().join("src/main.rs")).expect("file");
+        assert_eq!(on_disk, "fn main() {}\n");
+    }
+
+    #[test]
+    fn writing_tools_are_called_by_name_with_json_arguments() {
+        let dir = sources();
+        let workspace = writer(&dir);
+        let wrote = workspace
+            .call(
+                WRITE_FILE,
+                r#"{"path":"src/lib.rs","content":"pub fn run() {}\n"}"#,
+                None,
+            )
+            .expect("known tool")
+            .expect("written");
+        assert_eq!(wrote, "wrote src/lib.rs: 1 lines");
+        let edited = workspace
+            .call(
+                EDIT_FILE,
+                r#"{"path":"src/lib.rs","old":"run","new":"start"}"#,
+                None,
+            )
+            .expect("known tool")
+            .expect("edited");
+        assert_eq!(edited, "edited src/lib.rs");
+        let on_disk = std::fs::read_to_string(dir.path().join("src/lib.rs")).expect("file");
+        assert_eq!(on_disk, "pub fn start() {}\n");
+        assert_eq!(workspace.written(), ["src/lib.rs"]);
+    }
+
+    #[test]
+    fn writing_tool_with_extra_arguments_is_rejected_and_writes_nothing() {
+        let dir = sources();
+        let workspace = writer(&dir);
+        let smuggling = r#"{"path":"src/main.rs","content":"x","mode":"0777"}"#;
+        let rejected = workspace
+            .call(WRITE_FILE, smuggling, None)
+            .expect("known tool");
+        assert!(matches!(rejected, Err(ToolError::BadArguments(_))));
+        assert!(workspace.written().is_empty());
     }
 
     #[test]

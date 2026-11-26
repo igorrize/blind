@@ -20,7 +20,7 @@ use std::time::Duration;
 
 pub use app::Services;
 use app::{App, Flow, Tab};
-use chain_builder::{ARROW, ChainBuilder};
+use chain_builder::ChainBuilder;
 use chain_view::ChainView;
 use chat_view::ChatView;
 use layout::ScreenLayout;
@@ -43,7 +43,8 @@ const TICK: Duration = Duration::from_millis(50);
 const KEYS_HINT: &str = "Ctrl-X commands · Ctrl-C quit";
 const READING_HINT: &str = "↑↓ PgUp PgDn Home End scroll · Ctrl-X commands · Ctrl-C quit";
 const COMMAND_HINT: &str = "1 root · 2 settings · 3 chain · c build chain · s sidebar";
-const BUILDER_HINT: &str = "1-9 add step · Backspace remove · Enter use · Esc cancel";
+const BUILDER_HINT: &str =
+    "1-9 next step · + then 1-9 beside the last · Backspace remove · Enter use · Esc cancel";
 const SIDEBAR_HINT: &str = "↑↓ move · Enter open · Esc back";
 
 pub fn run(services: Services, root_model: RootModel, ui: UiSettings) -> anyhow::Result<()> {
@@ -87,7 +88,9 @@ fn draw(frame: &mut Frame, app: &mut App) {
     );
     if let Some(chain) = &app.building {
         let candidates = app.candidates();
-        frame.render_widget(ChainBuilder::new(chain, &candidates, theme), layout.content);
+        let builder = ChainBuilder::new(chain, app.beside, &candidates, theme)
+            .with_notice(app.builder_notice.as_deref());
+        frame.render_widget(builder, layout.content);
     }
 }
 
@@ -95,7 +98,7 @@ fn target(app: &App) -> Option<String> {
     if app.chain.is_empty() {
         return None;
     }
-    let chain = app.chain.join(ARROW);
+    let chain = &app.chain;
     Some(if app.sending_to_chain {
         format!("to chain: {chain} · Tab: talk to root")
     } else {

@@ -1,0 +1,10 @@
+{
+  "description": "Reviews the changed files against the task and the code rules.",
+  "model": "ollama-cloud/glm-5.3-flash",
+  "limits": {
+    "tool_calls": 25
+  },
+  "rules": [
+    "rust"
+  ]
+}

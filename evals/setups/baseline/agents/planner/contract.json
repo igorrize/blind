@@ -1,0 +1,23 @@
+{
+  "name": "planner",
+  "kind": "worker",
+  "input": {
+    "type": "object",
+    "required": ["files", "notes"],
+    "properties": {
+      "files": { "type": "array", "maxItems": 20, "items": { "type": "string", "maxLength": 200 } },
+      "notes": { "type": "string", "maxLength": 3000 }
+    }
+  },
+  "output": {
+    "type": "object",
+    "required": ["steps", "files"],
+    "properties": {
+      "steps": { "type": "array", "maxItems": 15, "items": { "type": "string", "maxLength": 400 } },
+      "files": { "type": "array", "maxItems": 20, "items": { "type": "string", "maxLength": 200 } }
+    }
+  },
+  "rights": {
+    "read": ["**"]
+  }
+}

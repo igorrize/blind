@@ -2,6 +2,7 @@ mod policy;
 mod search;
 mod tools;
 mod workspace;
+mod writing;
 
 pub use policy::{PolicyError, Refusal};
 pub use tools::ToolDescription;

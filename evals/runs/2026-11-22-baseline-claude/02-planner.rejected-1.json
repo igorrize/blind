@@ -1,0 +1,28 @@
+{
+  "steps": [
+    "New crates/blind/src/clipboard.rs, registered as `mod clipboard;` after `mod cli;` in main.rs: `const PROGRAM: &str = \"pbcopy\";` (reaches the macOS pasteboard, also inside zellij), `type Sink = Box<dyn Fn(&str) -> anyhow::Result<()>>;`, `pub struct Clipboard { write: Sink }`, `pub fn system() -> Self` with sink `|text: &str| piped(PROGRAM, text)`, `pub fn copy(&self, text: &str) -> anyhow::Result<()>`.",
+    "clipboard.rs: `fn piped(program: &str, text: &str) -> anyhow::Result<()>` spawns Command::new(program) with stdin piped, stdout/stderr Stdio::null(), context \"{program} did not start\"; `fn feed(input: Option<ChildStdin>, text: &str)` does write_all, then stdin is dropped; always `wait()`, then return the feed error, then `ensure!(status.success(), \"{program} ended with {status}\")`.",
+    "clipboard.rs `#[cfg(test)] pub(crate) mod test_support`: `pub type Copied = Rc<RefCell<Vec<String>>>`; `recording() -> (Clipboard, Copied)` pushes each text and returns Ok; `broken() -> Clipboard` fails with `anyhow!(\"no clipboard here\")`. Tests next to it: piped(\"cat\", ..) is Ok, piped(\"false\", ..) is Err, a missing program's `{:#}` error says \"<name> did not start\".",
+    "conversation.rs: add field `prompts: Vec<usize>` (entry indices of prompts said to root). In `say` push `self.entries.len()` before pushing the Human entry; `delegate` and `report` do not touch it. The Default derive still builds it.",
+    "conversation.rs private helpers, all `&self`: `unfinished_from() -> usize` = `self.prompts.last().copied().filter(|_| self.is_busy()).unwrap_or(self.entries.len())`; `finished_answer() -> Option<usize>` = rposition of a Speaker::Root entry in `self.entries[..self.unfinished_from()]`; `prompt_before(answer: usize) -> Option<&str>` = text of the last prompt index below `answer`.",
+    "conversation.rs public: `pub fn last_answer(&self) -> Option<&str>` = text of `finished_answer()` unchanged; `pub fn last_exchange(&self) -> Option<String>` = `format!(\"{prompt}\\n\\n{answer}\")` using `prompt_before`. While busy (Waiting/Answering) only entries from the current prompt on are hidden. A Failed partial reply counts as finished because it is no longer printing.",
+    "conversation.rs tests: None for both when empty or just asked; a markdown table sent as two Text parts then Done comes back unchanged, exchange \"q\\n\\n\"+table; when the next prompt is Waiting or Answering, the previous block is returned; Hel+report+lo while Answering gives None; a chain task delegated during the reply is not taken as the prompt; a Failed partial reply is returned.",
+    "tui/app.rs: `use crate::clipboard::Clipboard;`; add `pub clipboard: Clipboard` to Services; add private `clipboard: Clipboard` and `pub(super) status_note: Option<String>` to App, set in App::new (`services.clipboard`, `None`). First line of `handle`: `self.status_note = None;`, so the next key press clears the message.",
+    "app.rs consts COPY_ANSWER_KEY 'y', COPY_BLOCK_KEY 'Y', NOTHING_TO_COPY \"nothing to copy: root has no finished answer yet\". Free fn `copy_note(clipboard: &Clipboard, text: Option<&str>, what: &str) -> String`: None gives NOTHING_TO_COPY and does not touch the clipboard; Ok gives \"{what} copied · characters: {n}\" with n = text.chars().count(); Err gives \"not copied: {error:#}\".",
+    "app.rs run_command: before the Tab::numbered branch add `else if key == COPY_ANSWER_KEY { self.copy_answer() } else if key == COPY_BLOCK_KEY { self.copy_block() }`. copy_answer: `self.status_note = Some(copy_note(&self.clipboard, self.conversation.last_answer(), \"answer\"))`; copy_block: bind `self.conversation.last_exchange()` first, then pass `.as_deref()` with \"block\".",
+    "app.rs tests: `app_with(dir, crew, clipboard: Clipboard)`; `app` and `built` pass `recording().0`; add `copying(dir) -> (App, Copied)`. Fill the chat with `app.conversation.say(..)` and `receive(ReplyEvent::Text(..) / Done(Usage::default()))` (import blind_core::Usage). Test: Ctrl-X y copies a two-part table exactly, note \"answer copied · characters: {len}\", draft stays empty.",
+    "More app.rs tests: Ctrl-X Y copies exactly \"one\\n\\nfirst\"; while \"two\" is still answering, both keys copy the first block; an empty chat copies nothing and the note is NOTHING_TO_COPY; the next key (letter('a')) clears status_note; `app_with(.., broken())` gives the note \"not copied: no clipboard here\".",
+    "tui.rs: COMMAND_HINT = \"1 root · 2 settings · 3 chain · c build chain · s sidebar · y copy answer · Y copy block\" (keep it under 100 chars or the test screen cuts it); change to `fn hint(app: &App) -> &str`, which returns `app.status_note` first when set and otherwise the existing hint chain.",
+    "tui.rs tests: `app()` adds `clipboard: recording().0`; new test: say \"hi\", Text \"Hello\", Done, then Ctrl-X y; the screen shows \"answer copied · characters: 5\"; after letter('a') it shows READING_HINT and no \"copied\". session.rs: import Clipboard and add `clipboard: Clipboard::system()` to Services.",
+    "README.md Keys in the TUI: add that `Ctrl-X y` copies root's last finished answer and `Ctrl-X Y` copies the last prompt, a blank line and its answer, as raw text via `pbcopy` (macOS, works in zellij); the status line shows the count. Rules: no comments, small fns, every test_support item used, no `_ =>` on enums, rustfmt import order."
+  ],
+  "files": [
+    "crates/blind/src/clipboard.rs",
+    "crates/blind/src/main.rs",
+    "crates/blind/src/conversation.rs",
+    "crates/blind/src/tui/app.rs",
+    "crates/blind/src/tui.rs",
+    "crates/blind/src/session.rs",
+    "README.md"
+  ]
+}

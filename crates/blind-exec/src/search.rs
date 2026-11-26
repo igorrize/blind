@@ -155,6 +155,16 @@ mod tests {
     }
 
     #[test]
+    fn excluded_files_are_neither_found_nor_searched() {
+        let dir = sample();
+        let workspace = reading(&dir, &["**", "!docs/**"]);
+        let found = workspace.find_files("design").expect("searched");
+        assert!(!found.contains("docs/"), "{found}");
+        let matched = workspace.grep("design", false).expect("searched");
+        assert!(!matched.contains("docs/"), "{matched}");
+    }
+
+    #[test]
     fn protected_files_are_never_found_even_with_full_scope() {
         let dir = leaky();
         let workspace = reading(&dir, &["**"]);

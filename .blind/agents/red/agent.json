@@ -1,0 +1,10 @@
+{
+  "description": "Writes the failing tests for a task before the code exists.",
+  "model": "ollama-cloud/glm-5.3-flash",
+  "limits": {
+    "tool_calls": 40
+  },
+  "rules": [
+    "rust"
+  ]
+}

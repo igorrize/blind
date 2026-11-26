@@ -66,21 +66,24 @@ impl StatefulWidget for ChainView<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chain_log::RunEvent;
+    use crate::chain_log::{Kind as LineKind, RunEvent};
+    use crate::lineup::Lineup;
     use crate::tui::test_support::{following, following_text, style_of};
+
+    fn by_explorer(kind: LineKind, text: &str) -> RunEvent {
+        RunEvent::Step {
+            agent: "explorer".to_owned(),
+            kind,
+            text: text.to_owned(),
+        }
+    }
 
     fn log_of_a_run() -> ChainLog {
         let mut log = ChainLog::default();
-        log.start(&["explorer".to_owned()], "check it");
-        log.receive(RunEvent::StepStarted("explorer".to_owned()));
-        log.receive(RunEvent::ToolCalled {
-            call: "grep {}".to_owned(),
-            refusal: None,
-        });
-        log.receive(RunEvent::ToolCalled {
-            call: "read_file {}".to_owned(),
-            refusal: Some("not given".to_owned()),
-        });
+        log.start(&Lineup::parse(&["explorer".to_owned()]), "check it");
+        log.receive(RunEvent::StepStarted(vec!["explorer".to_owned()]));
+        log.receive(by_explorer(LineKind::Called, "· grep {}"));
+        log.receive(by_explorer(LineKind::Refused, "✗ read_file {} — not given"));
         log.receive(RunEvent::StepResult("{\n  \"files\": []\n}".to_owned()));
         log
     }
@@ -127,7 +130,7 @@ mod tests {
     fn long_log_shows_its_end() {
         let mut log = log_of_a_run();
         for number in 0..30 {
-            log.receive(RunEvent::Note(format!("note {number}")));
+            log.receive(by_explorer(LineKind::Note, &format!("note {number}")));
         }
         let text = following_text(ChainView::new(&log, Theme::default()), 60, 6);
         assert!(text.contains("note 29"), "{text}");

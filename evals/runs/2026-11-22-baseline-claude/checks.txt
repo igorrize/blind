@@ -1,0 +1,18 @@
+# Checks — copy-blocks, baseline, Claude Code reference
+
+## Base caeedbb, before the agents
+== fmt
+fmt-ok
+== clippy
+clippy-ok
+== test
+passed 456, failed 0
+
+## After the chain, commit 09dbe89
+fmt: ok (the first record said FAILED: that came from the unformatted acceptance file, not from the agents' code)
+clippy: ok
+tests without acceptance: passed 472, failed 0
+
+## With the acceptance tests added
+all tests: passed 480, failed 0
+acceptance: test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 293 filtered out; finished in 0.00s

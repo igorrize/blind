@@ -8,7 +8,7 @@ A TUI harness for AI agents with super-strict limits on agents and sub-agents.
 - Rights only shrink down the call tree. Only a human writes and approves the rules.
 
 Status: **in progress** — strict JSON contracts, chain type checks, `blind agent check`, an OpenAI-compatible
-provider (ollama.com), a chat with root in the TUI, workers under a contract (`blind run`) and chains of them (`blind chain run`). Workers can find, list, read and search project files (search runs on the fff engine) within the read rights of their contract; they cannot write or run commands yet. Design: [`docs/DESIGN.md`](docs/DESIGN.md).
+provider (ollama.com), a chat with root in the TUI, workers under a contract (`blind run`) and chains of them (`blind chain run`). Workers can find, list, read and search project files (search runs on the fff engine) within the read rights of their contract. Workers with write rights change files only in a git worktree copy of the project, never in the project itself; they cannot run commands yet. Design: [`docs/DESIGN.md`](docs/DESIGN.md).
 
 ## Build
 

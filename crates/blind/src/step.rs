@@ -13,6 +13,8 @@ mod files;
 mod finishing;
 #[cfg(test)]
 mod guarantees;
+#[cfg(test)]
+mod writing;
 
 pub const MAX_FAILED_TURNS: u32 = 4;
 pub const FINISHING_TURNS: u32 = 2;
@@ -25,6 +27,9 @@ Finish by calling the `complete` tool with the result. Do not answer in plain te
 only a `complete` call is accepted.";
 const FILES_NOTE: &str = "You can look at the project with the other tools. \
 Base the result on what you actually read, do not guess file names or contents.";
+const WRITING_NOTE: &str = "You can change files with `write_file` and `edit_file`, only where your rights allow. \
+You cannot run commands: nothing is built or tested for you, so read the code you call before you use it.";
+const REPORTED_NOTE: &str = "The harness itself reports which files you wrote: do not list them.";
 const REMINDER: &str = "You have not finished. Call the `complete` tool with the result now.";
 const FINISH_NOW: &str = "You may not look at the project any more. \
 Call the `complete` tool now with the result based on what you have already seen. \
@@ -53,6 +58,13 @@ pub enum Stop {
     OutOfTokens,
     OutOfTurns,
     NoValidResult,
+    WroteMoreThanItsContractHolds,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ground<'a> {
+    Project(&'a Path),
+    Copy(&'a Path),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -66,6 +78,31 @@ pub enum Progress<'a> {
     Rejected(&'a str),
     Reminded,
     ToldToFinish(&'a str),
+}
+
+pub const REMINDED: &str = "no `complete` call, reminding the agent";
+
+impl Progress<'_> {
+    pub fn described(&self) -> String {
+        match self {
+            Progress::Text(text) => (*text).to_owned(),
+            Progress::ToolCalled {
+                name,
+                arguments,
+                refusal: None,
+            } => format!("· {name} {arguments}"),
+            Progress::ToolCalled {
+                name,
+                arguments,
+                refusal: Some(refusal),
+            } => format!("✗ {name} {arguments} — {refusal}"),
+            Progress::Rejected(reason) => (*reason).to_owned(),
+            Progress::Reminded => REMINDED.to_owned(),
+            Progress::ToldToFinish(reason) => {
+                format!("{reason}: tools are taken away, the agent must finish now")
+            }
+        }
+    }
 }
 
 enum Verdict {
@@ -128,23 +165,28 @@ impl Stop {
             Stop::OutOfTokens => "it used more tokens than one step may",
             Stop::OutOfTurns => "it used every turn without finishing",
             Stop::NoValidResult => "it gave no valid result",
+            Stop::WroteMoreThanItsContractHolds => {
+                "the files it wrote do not fit the field its contract reports them in"
+            }
         }
     }
 }
 
-pub fn workspace_for(agent: &Agent, project: &Path) -> anyhow::Result<Option<Workspace>> {
+pub fn workspace_for(agent: &Agent, ground: Ground<'_>) -> anyhow::Result<Option<Workspace>> {
     let rights = agent.contract().rights();
-    if !rights.write().is_empty() {
-        bail!(
-            "agent `{}` asks for write rights, which blind cannot grant yet",
-            agent.contract().name()
-        );
-    }
-    if rights.read().is_empty() {
+    if rights.read().is_empty() && rights.write().is_empty() {
         return Ok(None);
     }
-    let workspace = Workspace::open(project, rights.read(), &rights.tools())?;
-    Ok(Some(workspace))
+    let root = match ground {
+        Ground::Copy(copy) => copy,
+        Ground::Project(project) if rights.write().is_empty() => project,
+        Ground::Project(_) => bail!(
+            "agent `{}` writes files, and agents may write only in a copy of the project",
+            agent.contract().name()
+        ),
+    };
+    let workspace = Workspace::open(root, rights.read(), &rights.tools())?;
+    Ok(Some(workspace.writing(rights.write())?))
 }
 
 pub async fn run_step(
@@ -166,7 +208,7 @@ pub async fn run_step(
     let given = given_files(agent, input);
     let mut messages = vec![
         Message::system(&system_prompt(agent, workspace)),
-        Message::user(&assignment(task, input)),
+        Message::user(&assignment(task, input, &asked_of_the_model(agent))),
     ];
     let mut report = StepReport::default();
     let mut failed_turns = 0;
@@ -193,7 +235,7 @@ pub async fn run_step(
         report.usage = report.usage.plus(turn.usage);
         messages.push(Message::assistant_turn(&turn));
         match verdict(agent, &turn) {
-            Verdict::Accepted(output) => return Ok(StepOutcome::Completed { output, report }),
+            Verdict::Accepted(output) => return Ok(finished(agent, workspace, output, report)),
             Verdict::Rejected(reason) => {
                 failed_turns += 1;
                 report.rejections += 1;
@@ -218,6 +260,42 @@ pub async fn run_step(
     }
 }
 
+fn finished(
+    agent: &Agent,
+    workspace: Option<&Workspace>,
+    output: Value,
+    report: StepReport,
+) -> StepOutcome {
+    let Some(field) = agent.contract().rights().written_as() else {
+        return StepOutcome::Completed { output, report };
+    };
+    let written = workspace.map(Workspace::written).unwrap_or_default();
+    let output = with_field(output, field, Value::from(written));
+    if agent.contract().output().violations(&output).is_empty() {
+        StepOutcome::Completed { output, report }
+    } else {
+        StepOutcome::Failed {
+            report,
+            stop: Stop::WroteMoreThanItsContractHolds,
+        }
+    }
+}
+
+fn with_field(mut output: Value, field: &str, value: Value) -> Value {
+    if let Value::Object(fields) = &mut output {
+        fields.insert(field.to_owned(), value);
+    }
+    output
+}
+
+fn asked_of_the_model(agent: &Agent) -> blind_core::ObjectSchema {
+    let output = agent.contract().output();
+    match agent.contract().rights().written_as() {
+        Some(field) => output.without(field),
+        None => output.clone(),
+    }
+}
+
 struct Reach<'a> {
     workspace: Option<&'a Workspace>,
     given: Option<&'a [String]>,
@@ -228,7 +306,7 @@ fn offered_tools(agent: &Agent, workspace: Option<&Workspace>) -> Vec<ToolSpec> 
     let complete = ToolSpec {
         name: COMPLETE,
         description: COMPLETE_DESCRIPTION,
-        parameters: agent.contract().output().to_json_schema(),
+        parameters: asked_of_the_model(agent).to_json_schema(),
     };
     let reading = workspace.map(Workspace::offered).unwrap_or_default();
     let reading = reading.into_iter().map(|tool| ToolSpec {
@@ -241,14 +319,54 @@ fn offered_tools(agent: &Agent, workspace: Option<&Workspace>) -> Vec<ToolSpec> 
 
 fn system_prompt(agent: &Agent, workspace: Option<&Workspace>) -> String {
     let prompt = agent.prompt().trim();
-    match workspace {
-        Some(_) => format!("{PREAMBLE}\n{FILES_NOTE}\n\n{prompt}"),
-        None => format!("{PREAMBLE}\n\n{prompt}"),
-    }
+    let writes = workspace.is_some_and(Workspace::can_write);
+    let reported = writes && agent.contract().rights().written_as().is_some();
+    let notes = [
+        Some(PREAMBLE),
+        workspace.map(|_| FILES_NOTE),
+        writes.then_some(WRITING_NOTE),
+        reported.then_some(REPORTED_NOTE),
+    ];
+    let notes: Vec<&str> = notes.into_iter().flatten().collect();
+    format!("{}\n\n{prompt}", notes.join("\n"))
 }
 
-fn assignment(task: &str, input: &Value) -> String {
-    format!("Task:\n{task}\n\nInput:\n{input:#}")
+fn assignment(task: &str, input: &Value, asked: &blind_core::ObjectSchema) -> String {
+    let limits = result_limits(&asked.to_json_schema());
+    let parts = [
+        Some(format!("Task:\n{task}")),
+        Some(format!("Input:\n{input:#}")),
+        limits,
+    ];
+    let parts: Vec<String> = parts.into_iter().flatten().collect();
+    parts.join("\n\n")
+}
+
+fn result_limits(asked: &Value) -> Option<String> {
+    let fields = asked["properties"].as_object()?;
+    let limits: Vec<String> = fields
+        .iter()
+        .filter_map(|(name, field)| limit_of(name, field))
+        .collect();
+    (!limits.is_empty()).then(|| {
+        format!(
+            "Limits of the result, counted exactly: {}. Stay clearly under them.",
+            limits.join("; ")
+        )
+    })
+}
+
+fn limit_of(name: &str, field: &Value) -> Option<String> {
+    let characters = field["maxLength"].as_u64();
+    let items = field["maxItems"].as_u64();
+    let each = field["items"]["maxLength"].as_u64();
+    let parts = [
+        characters.map(|limit| format!("at most {limit} characters")),
+        items.map(|limit| format!("at most {limit} items")),
+        each.map(|limit| format!("each at most {limit} characters")),
+    ];
+    let parts: Vec<String> = parts.into_iter().flatten().collect();
+    (!parts.is_empty()).then(|| format!("`{name}` {}", parts.join(", ")))
 }
 
 fn given_files(agent: &Agent, input: &Value) -> Option<Vec<String>> {
@@ -270,7 +388,7 @@ fn verdict(agent: &Agent, turn: &Turn) -> Verdict {
         Ok(output) => output,
         Err(error) => return Verdict::Rejected(rejection(&[format!("not valid JSON: {error}")])),
     };
-    let violations = agent.contract().output().violations(&output);
+    let violations = asked_of_the_model(agent).violations(&output);
     if violations.is_empty() {
         Verdict::Accepted(output)
     } else {
@@ -530,6 +648,50 @@ mod tests {
             forced.to_string(),
             "turns: 2, tool calls: 0, rejected: 1 · tokens: 20 in, 10 out · forced to finish"
         );
+    }
+
+    #[test]
+    fn progress_is_described_in_one_line() {
+        let called = Progress::ToolCalled {
+            name: "grep",
+            arguments: "{}",
+            refusal: None,
+        };
+        let refused = Progress::ToolCalled {
+            name: "read_file",
+            arguments: "{}",
+            refusal: Some("not given"),
+        };
+        assert_eq!(called.described(), "· grep {}");
+        assert_eq!(refused.described(), "✗ read_file {} — not given");
+        assert_eq!(Progress::Reminded.described(), REMINDED);
+        assert_eq!(
+            Progress::ToldToFinish("time is up").described(),
+            "time is up: tools are taken away, the agent must finish now"
+        );
+    }
+
+    #[test]
+    fn assignment_spells_out_the_limits_of_the_result() {
+        let asked = asked_of_the_model(&planner());
+        let assignment = assignment("ship it", &json!({}), &asked);
+        assert!(
+            assignment.starts_with("Task:\nship it\n\nInput:\n{}"),
+            "{assignment}"
+        );
+        assert!(
+            assignment.ends_with(
+                "Limits of the result, counted exactly: `steps` at most 3 items, \
+                 each at most 40 characters. Stay clearly under them."
+            ),
+            "{assignment}"
+        );
+    }
+
+    #[test]
+    fn result_without_limits_adds_nothing_to_the_assignment() {
+        let free = json!({"type": "object", "properties": {"approved": {"type": "boolean"}}});
+        assert_eq!(result_limits(&free), None);
     }
 
     #[test]

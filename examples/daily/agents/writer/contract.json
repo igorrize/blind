@@ -1,0 +1,54 @@
+{
+  "name": "writer",
+  "kind": "worker",
+  "input": {
+    "type": "object",
+    "properties": {
+      "tests": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "files": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "output": {
+    "type": "object",
+    "required": [
+      "changed",
+      "summary"
+    ],
+    "properties": {
+      "changed": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "maxItems": 30
+      },
+      "summary": {
+        "type": "string",
+        "maxLength": 3000
+      }
+    }
+  },
+  "rights": {
+    "read": [
+      "**"
+    ],
+    "write": [
+      "crates/**",
+      "README.md",
+      "!crates/**/tests.rs",
+      "!crates/*/tests/**"
+    ],
+    "written_as": "changed"
+  }
+}

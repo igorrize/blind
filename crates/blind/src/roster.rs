@@ -1,6 +1,8 @@
 use std::path::Path;
 
-use blind_core::{Agent, CONTRACT_FILE, PROMPT_FILE, ReadingTool, Rights, SETTINGS_FILE};
+use blind_core::{
+    Agent, CONTRACT_FILE, ObjectSchema, PROMPT_FILE, ReadingTool, Rights, SETTINGS_FILE,
+};
 use serde_json::Value;
 
 use crate::agents::{self, Loaded};
@@ -13,6 +15,20 @@ pub fn of(dir: &Path) -> String {
         Ok(loaded) if loaded.is_empty() => no_agents(&place, "it has no agent folders"),
         Ok(loaded) => listed(&place, &loaded),
         Err(error) => no_agents(&place, &format!("it cannot be read: {error}")),
+    }
+}
+
+pub fn delivery(root_input: &ObjectSchema) -> String {
+    let fields = fields(&root_input.to_json_schema());
+    if fields.is_empty() {
+        "Your contract takes no fields from chains: when the user runs a chain, you only learn \
+         whether it finished. To receive results, the project needs .blind/root/contract.json."
+            .to_owned()
+    } else {
+        format!(
+            "When the user runs a chain, its result reaches you only through your contract: \
+             {fields}. Fields of other names are dropped by the harness."
+        )
     }
 }
 
@@ -58,10 +74,7 @@ fn usable(agent: &Agent) -> String {
             or_nothing(fields(&contract.output().to_json_schema()))
         ),
         format!("reads: {}", reading(contract.rights())),
-        format!(
-            "writes: {}",
-            or_nothing(contract.rights().write().join(", "))
-        ),
+        format!("writes: {}", writing(contract.rights())),
         format!(
             "limits: {} turns, {} tokens, {} tool calls",
             limits.turns, limits.tokens, limits.tool_calls
@@ -112,6 +125,14 @@ fn reading(rights: &Rights) -> String {
     let scope = format!("{} with {}", rights.read().join(", "), tools.join(", "));
     match rights.read_from() {
         Some(field) => format!("{scope}; whole files only from the input field `{field}`"),
+        None => scope,
+    }
+}
+
+fn writing(rights: &Rights) -> String {
+    let scope = or_nothing(rights.write().join(", "));
+    match rights.written_as() {
+        Some(field) => format!("{scope}; the harness reports the written files in `{field}`"),
         None => scope,
     }
 }
@@ -223,6 +244,45 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let roster = of(dir.path());
         assert!(roster.contains("it has no agent folders"), "{roster}");
+    }
+
+    #[test]
+    fn root_is_told_which_fields_of_a_chain_result_reach_it() {
+        let root = blind_core::Contract::from_json(
+            r#"{"name":"root","kind":"root","input":{"type":"object","properties":{
+                "summary":{"type":"string"},
+                "findings":{"type":"array","items":{"type":"string"}}}}}"#,
+        )
+        .expect("valid root");
+        let note = delivery(root.input());
+        assert!(
+            note.contains("findings (list of string, optional), summary (string, optional)"),
+            "{note}"
+        );
+        assert!(note.contains("dropped"), "{note}");
+    }
+
+    #[test]
+    fn root_without_a_contract_is_told_it_receives_nothing() {
+        let note = delivery(&ObjectSchema::empty());
+        assert!(note.contains("takes no fields"), "{note}");
+    }
+
+    #[test]
+    fn writer_is_described_with_what_it_may_write_and_who_reports_it() {
+        let daily = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/daily/agents");
+        let roster = of(&daily);
+        assert!(
+            roster.contains(
+                "writes: crates/**, README.md, !crates/**/tests.rs, !crates/*/tests/**; \
+                 the harness reports the written files in `changed`"
+            ),
+            "{roster}"
+        );
+        assert!(
+            roster.contains("writes: crates/**/tests.rs, crates/*/tests/**;"),
+            "{roster}"
+        );
     }
 
     #[test]

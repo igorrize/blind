@@ -2,7 +2,7 @@ use std::fmt;
 
 use serde::Deserialize;
 
-const MAX_LENGTH: usize = 48;
+pub(crate) const MAX_LENGTH: usize = 48;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(try_from = "String")]
@@ -36,7 +36,7 @@ impl fmt::Display for AgentName {
     }
 }
 
-fn is_valid(name: &str) -> bool {
+pub(crate) fn is_valid(name: &str) -> bool {
     (1..=MAX_LENGTH).contains(&name.len()) && name.chars().all(is_allowed)
 }
 

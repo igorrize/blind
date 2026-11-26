@@ -1,0 +1,635 @@
+diff --git a/README.md b/README.md
+index acaec51..e930b4e 100644
+--- a/README.md
++++ b/README.md
+@@ -49,6 +49,12 @@ The key is read from the environment only and never written to a file.
+ Keys in the TUI: `Enter` sends, `Ctrl-X 1` opens the root chat, `Ctrl-X 2` opens settings, `Ctrl-X s` focuses the sidebar (`↑↓`, `Enter`, `Esc`) (`↑↓` and `Enter`
+ pick the theme and the root model, `r` reloads the model list), `Ctrl-C` quits. The theme is one of the four Catppuccin flavors and is saved to `~/.config/blind/ui.toml`.
+ 
++Copying blocks, as in Warp: `Ctrl-X y` copies root's last finished answer, `Ctrl-X Y` copies the last prompt, a blank
++line and its answer. The raw text goes to the clipboard as the model wrote it: no wrapping to the window width, no `you`
++and `root` labels, markdown tables whole. An answer that is still printing is not finished, so the block before it is
++copied. Copying goes through `pbcopy` (macOS, works inside zellij). The status line shows how many characters were
++copied, or that there is nothing to copy yet, until the next key.
++
+ `cargo blind` is an alias from `.cargo/config.toml`. To get a plain `blind` command:
+ 
+ ```sh
+diff --git a/crates/blind/src/clipboard.rs b/crates/blind/src/clipboard.rs
+new file mode 100644
+index 0000000..d5de172
+--- /dev/null
++++ b/crates/blind/src/clipboard.rs
+@@ -0,0 +1,108 @@
++use std::{
++    io::Write,
++    process::{ChildStdin, Command, Stdio},
++};
++
++use anyhow::{Context, ensure};
++
++const PROGRAM: &str = "pbcopy";
++
++type Sink = Box<dyn Fn(&str) -> anyhow::Result<()>>;
++
++pub struct Clipboard {
++    write: Sink,
++}
++
++impl Clipboard {
++    pub fn system() -> Self {
++        Self {
++            write: Box::new(|text: &str| piped(PROGRAM, text)),
++        }
++    }
++
++    pub fn copy(&self, text: &str) -> anyhow::Result<()> {
++        (self.write)(text)
++    }
++}
++
++fn piped(program: &str, text: &str) -> anyhow::Result<()> {
++    let mut child = Command::new(program)
++        .stdin(Stdio::piped())
++        .stdout(Stdio::null())
++        .stderr(Stdio::null())
++        .spawn()
++        .with_context(|| format!("{program} did not start"))?;
++    let fed = feed(child.stdin.take(), text);
++    let status = child
++        .wait()
++        .with_context(|| format!("{program} did not finish"))?;
++    fed?;
++    ensure!(status.success(), "{program} ended with {status}");
++    Ok(())
++}
++
++fn feed(input: Option<ChildStdin>, text: &str) -> anyhow::Result<()> {
++    let mut input = input.context("no input to write the text to")?;
++    input
++        .write_all(text.as_bytes())
++        .context("the text was not written")
++}
++
++#[cfg(test)]
++pub(crate) mod test_support {
++    use std::{cell::RefCell, rc::Rc};
++
++    use anyhow::anyhow;
++
++    use super::Clipboard;
++
++    pub type Copied = Rc<RefCell<Vec<String>>>;
++
++    pub fn recording() -> (Clipboard, Copied) {
++        let copied = Copied::default();
++        let kept = Rc::clone(&copied);
++        let write = move |text: &str| -> anyhow::Result<()> {
++            kept.borrow_mut().push(text.to_owned());
++            Ok(())
++        };
++        let clipboard = Clipboard {
++            write: Box::new(write),
++        };
++        (clipboard, copied)
++    }
++
++    pub fn broken() -> Clipboard {
++        Clipboard {
++            write: Box::new(refuse),
++        }
++    }
++
++    fn refuse(_text: &str) -> anyhow::Result<()> {
++        Err(anyhow!("no clipboard here"))
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    const MISSING_PROGRAM: &str = "blind-no-such-clipboard-program";
++
++    #[test]
++    fn text_is_fed_to_a_program_that_reads_it() {
++        assert!(piped("cat", "| a | b |\n|---|---|\n").is_ok());
++    }
++
++    #[test]
++    fn program_that_fails_is_an_error() {
++        assert!(piped("false", "text").is_err());
++    }
++
++    #[test]
++    fn missing_program_says_it_did_not_start() {
++        let error = piped(MISSING_PROGRAM, "text").expect_err("no such program");
++        let message = format!("{error:#}");
++        let expected = format!("{MISSING_PROGRAM} did not start");
++        assert!(message.contains(&expected), "{message}");
++    }
++}
+diff --git a/crates/blind/src/conversation.rs b/crates/blind/src/conversation.rs
+index c25f8f0..e2870fb 100644
+--- a/crates/blind/src/conversation.rs
++++ b/crates/blind/src/conversation.rs
+@@ -32,12 +32,14 @@ pub enum ReplyEvent {
+ #[derive(Debug, Default)]
+ pub struct Conversation {
+     entries: Vec<Entry>,
++    prompts: Vec<usize>,
+     status: Status,
+     last_usage: Option<Usage>,
+ }
+ 
+ impl Conversation {
+     pub fn say(&mut self, text: String) {
++        self.prompts.push(self.entries.len());
+         self.push(Speaker::Human, text);
+         self.status = Status::Waiting;
+     }
+@@ -77,6 +79,41 @@ impl Conversation {
+         self.last_usage
+     }
+ 
++    pub fn last_answer(&self) -> Option<&str> {
++        self.finished_answer()
++            .and_then(|answer| self.text_at(answer))
++    }
++
++    pub fn last_exchange(&self) -> Option<String> {
++        let answer = self.finished_answer()?;
++        let prompt = self.prompt_before(answer)?;
++        let reply = self.text_at(answer)?;
++        Some(format!("{prompt}\n\n{reply}"))
++    }
++
++    fn unfinished_from(&self) -> usize {
++        self.prompts
++            .last()
++            .copied()
++            .filter(|_| self.is_busy())
++            .unwrap_or(self.entries.len())
++    }
++
++    fn finished_answer(&self) -> Option<usize> {
++        self.entries[..self.unfinished_from()]
++            .iter()
++            .rposition(|entry| entry.speaker == Speaker::Root)
++    }
++
++    fn prompt_before(&self, answer: usize) -> Option<&str> {
++        let asked = self.prompts.iter().rfind(|&&at| at < answer)?;
++        self.text_at(*asked)
++    }
++
++    fn text_at(&self, index: usize) -> Option<&str> {
++        self.entries.get(index).map(|entry| entry.text.as_str())
++    }
++
+     fn append_reply(&mut self, text: &str) {
+         if self.status == Status::Answering
+             && let Some(reply) = self.entries.last_mut()
+@@ -220,4 +257,80 @@ mod tests {
+             ]
+         );
+     }
++
++    fn done() -> ReplyEvent {
++        ReplyEvent::Done(Usage::default())
++    }
++
++    fn answered(question: &str, answer: &str) -> Conversation {
++        let mut conversation = asked(question);
++        conversation.receive(text(answer));
++        conversation.receive(done());
++        conversation
++    }
++
++    fn copied(conversation: &Conversation) -> (Option<&str>, Option<String>) {
++        (conversation.last_answer(), conversation.last_exchange())
++    }
++
++    #[test]
++    fn nothing_is_copied_before_root_finishes_an_answer() {
++        assert_eq!(copied(&Conversation::default()), (None, None));
++        assert_eq!(copied(&asked("hi")), (None, None));
++    }
++
++    #[test]
++    fn markdown_table_streamed_in_parts_comes_back_unchanged() {
++        let header = "| agent | role |\n|---|---|\n";
++        let row = "| explorer | finds files |\n";
++        let table = format!("{header}{row}");
++        let mut conversation = asked("q");
++        conversation.receive(text(header));
++        conversation.receive(text(row));
++        conversation.receive(done());
++        assert_eq!(conversation.last_answer(), Some(table.as_str()));
++        assert_eq!(conversation.last_exchange(), Some(format!("q\n\n{table}")));
++    }
++
++    #[test]
++    fn next_prompt_in_progress_leaves_the_previous_block_to_copy() {
++        let mut conversation = answered("one", "first");
++        let previous = (Some("first"), Some("one\n\nfirst".to_owned()));
++        conversation.say("two".to_owned());
++        assert_eq!(copied(&conversation), previous);
++        conversation.receive(text("sec"));
++        assert_eq!(copied(&conversation), previous);
++    }
++
++    #[test]
++    fn answer_split_by_a_chain_report_is_not_finished_while_root_still_answers() {
++        let mut conversation = asked("hi");
++        conversation.receive(text("Hel"));
++        conversation.report("explorer\n{}".to_owned());
++        conversation.receive(text("lo"));
++        assert_eq!(copied(&conversation), (None, None));
++    }
++
++    #[test]
++    fn chain_task_delegated_while_root_answers_is_not_taken_for_the_prompt() {
++        let mut conversation = asked("q");
++        conversation.delegate("check the loader".to_owned());
++        conversation.receive(text("answer"));
++        conversation.receive(done());
++        assert_eq!(
++            copied(&conversation),
++            (Some("answer"), Some("q\n\nanswer".to_owned()))
++        );
++    }
++
++    #[test]
++    fn failed_partial_reply_counts_as_finished() {
++        let mut conversation = asked("hi");
++        conversation.receive(text("Hel"));
++        conversation.receive(ReplyEvent::Failed("connection reset".to_owned()));
++        assert_eq!(
++            copied(&conversation),
++            (Some("Hel"), Some("hi\n\nHel".to_owned()))
++        );
++    }
+ }
+diff --git a/crates/blind/src/main.rs b/crates/blind/src/main.rs
+index bbb3913..dfe2e81 100644
+--- a/crates/blind/src/main.rs
++++ b/crates/blind/src/main.rs
+@@ -7,6 +7,7 @@ mod chain_command;
+ mod chain_log;
+ mod chain_run;
+ mod cli;
++mod clipboard;
+ mod conversation;
+ mod crew;
+ mod lineup;
+diff --git a/crates/blind/src/session.rs b/crates/blind/src/session.rs
+index 522aeef..289aa9c 100644
+--- a/crates/blind/src/session.rs
++++ b/crates/blind/src/session.rs
+@@ -6,6 +6,7 @@ use crate::chain_backend::ChainBackend;
+ use crate::chain_command;
+ use crate::chain_run::Link;
+ use crate::cli::AGENTS_DIR;
++use crate::clipboard::Clipboard;
+ use crate::crew::Crew;
+ use crate::lineup::Lineup;
+ use crate::providers::{self, config};
+@@ -27,6 +28,7 @@ pub fn run() -> anyhow::Result<ExitCode> {
+         backend: Backend::start(client, model.model().to_owned(), &roster::of(agents_dir))?,
+         chain_backend: ChainBackend::start(Box::new(links_in_this_project))?,
+         crew: Crew::of(agents::load_all(agents_dir).unwrap_or_default()),
++        clipboard: Clipboard::system(),
+     };
+     tui::run(services, RootModel::new(config_path, model), ui)?;
+     Ok(ExitCode::SUCCESS)
+diff --git a/crates/blind/src/tui.rs b/crates/blind/src/tui.rs
+index 3b5c78a..cd57306 100644
+--- a/crates/blind/src/tui.rs
++++ b/crates/blind/src/tui.rs
+@@ -42,7 +42,8 @@ use crate::ui_config::UiSettings;
+ const TICK: Duration = Duration::from_millis(50);
+ const KEYS_HINT: &str = "Ctrl-X commands · Ctrl-C quit";
+ const READING_HINT: &str = "↑↓ PgUp PgDn Home End scroll · Ctrl-X commands · Ctrl-C quit";
+-const COMMAND_HINT: &str = "1 root · 2 settings · 3 chain · c build chain · s sidebar";
++const COMMAND_HINT: &str =
++    "1 root · 2 settings · 3 chain · c build chain · s sidebar · y copy answer · Y copy block";
+ const BUILDER_HINT: &str =
+     "1-9 next step · + then 1-9 beside the last · Backspace remove · Enter use · Esc cancel";
+ const SIDEBAR_HINT: &str = "↑↓ move · Enter open · Esc back";
+@@ -131,7 +132,12 @@ fn draw_active_tab(frame: &mut Frame, app: &mut App, theme: Theme, area: Rect) {
+     }
+ }
+ 
+-fn hint(app: &App) -> &'static str {
++fn hint(app: &App) -> &str {
++    let note = app.status_note.as_deref();
++    note.unwrap_or_else(|| mode_hint(app))
++}
++
++fn mode_hint(app: &App) -> &'static str {
+     if app.awaiting_command {
+         COMMAND_HINT
+     } else if app.building.is_some() {
+@@ -147,12 +153,15 @@ fn hint(app: &App) -> &'static str {
+ 
+ #[cfg(test)]
+ mod tests {
++    use blind_core::Usage;
+     use ratatui::{Terminal, backend::TestBackend, buffer::Buffer, crossterm::event::KeyCode};
+     use tempfile::TempDir;
+ 
+     use super::*;
+     use crate::backend::test_support::offline;
+     use crate::chain_backend::test_support::unable_to_run;
++    use crate::clipboard::test_support::recording;
++    use crate::conversation::ReplyEvent;
+     use crate::crew::test_support::explorer_planner_reviewer;
+     use crate::root_model::test_support::saved_in;
+     use crate::tui::keys::test_support::{ctrl, letter, plain};
+@@ -165,6 +174,7 @@ mod tests {
+             backend: offline(),
+             chain_backend: unable_to_run(),
+             crew: explorer_planner_reviewer(),
++            clipboard: recording().0,
+         };
+         App::new(services, saved_in(dir), ui)
+     }
+@@ -295,6 +305,23 @@ mod tests {
+         assert_shows(&screen(&mut app), &["[ chain ]", "explorer · go"]);
+     }
+ 
++    #[test]
++    fn copy_note_replaces_the_hint_until_the_next_key() {
++        let dir = tempfile::tempdir().expect("temp dir");
++        let mut app = app(&dir);
++        app.conversation.say("hi".to_owned());
++        app.conversation
++            .receive(ReplyEvent::Text("Hello".to_owned()));
++        app.conversation.receive(ReplyEvent::Done(Usage::default()));
++        app.handle(ctrl('x'));
++        app.handle(letter('y'));
++        assert_shows(&screen(&mut app), &["answer copied · characters: 5"]);
++        app.handle(letter('a'));
++        let after = screen(&mut app);
++        assert_shows(&after, &[READING_HINT]);
++        assert!(!after.contains("copied"), "{after}");
++    }
++
+     #[test]
+     fn whole_screen_is_painted_with_the_theme_background() {
+         let dir = tempfile::tempdir().expect("temp dir");
+diff --git a/crates/blind/src/tui/app.rs b/crates/blind/src/tui/app.rs
+index 0acb058..652f2f3 100644
+--- a/crates/blind/src/tui/app.rs
++++ b/crates/blind/src/tui/app.rs
+@@ -6,6 +6,7 @@ use super::scroll::Scroll;
+ use crate::backend::{Backend, BackendEvent};
+ use crate::chain_backend::ChainBackend;
+ use crate::chain_log::{ChainLog, RunEvent};
++use crate::clipboard::Clipboard;
+ use crate::conversation::{Conversation, ReplyEvent};
+ use crate::crew::{Candidate, Crew};
+ use crate::lineup::Lineup;
+@@ -18,6 +19,9 @@ const RELOAD_KEY: char = 'r';
+ const SIDEBAR_KEY: char = 's';
+ const CHAIN_KEY: char = 'c';
+ const BESIDE_KEY: char = '+';
++const COPY_ANSWER_KEY: char = 'y';
++const COPY_BLOCK_KEY: char = 'Y';
++const NOTHING_TO_COPY: &str = "nothing to copy: root has no finished answer yet";
+ 
+ #[derive(Debug, PartialEq, Eq)]
+ pub enum Flow {
+@@ -43,6 +47,7 @@ pub struct App {
+     pub(super) awaiting_command: bool,
+     pub(super) sidebar_cursor: Option<Tab>,
+     pub(super) notice: Option<String>,
++    pub(super) status_note: Option<String>,
+     pub(super) chain: Lineup,
+     pub(super) building: Option<Lineup>,
+     pub(super) beside: bool,
+@@ -53,12 +58,14 @@ pub struct App {
+     crew: Crew,
+     backend: Backend,
+     chain_backend: ChainBackend,
++    clipboard: Clipboard,
+ }
+ 
+ pub struct Services {
+     pub backend: Backend,
+     pub chain_backend: ChainBackend,
+     pub crew: Crew,
++    pub clipboard: Clipboard,
+ }
+ 
+ impl Tab {
+@@ -100,6 +107,7 @@ impl App {
+             awaiting_command: false,
+             sidebar_cursor: None,
+             notice: None,
++            status_note: None,
+             chain: Lineup::default(),
+             building: None,
+             beside: false,
+@@ -110,6 +118,7 @@ impl App {
+             crew: services.crew,
+             backend: services.backend,
+             chain_backend: services.chain_backend,
++            clipboard: services.clipboard,
+         }
+     }
+ 
+@@ -149,6 +158,7 @@ impl App {
+     }
+ 
+     pub fn handle(&mut self, key: KeyEvent) -> Flow {
++        self.status_note = None;
+         let Some(action) = keys::action_for(key) else {
+             return Flow::Continue;
+         };
+@@ -178,11 +188,25 @@ impl App {
+             self.toggle_sidebar();
+         } else if key == CHAIN_KEY {
+             self.building = Some(self.chain.clone());
++        } else if key == COPY_ANSWER_KEY {
++            self.copy_answer();
++        } else if key == COPY_BLOCK_KEY {
++            self.copy_block();
+         } else if let Some(tab) = Tab::numbered(key) {
+             self.open(tab);
+         }
+     }
+ 
++    fn copy_answer(&mut self) {
++        let answer = self.conversation.last_answer();
++        self.status_note = Some(copy_note(&self.clipboard, answer, "answer"));
++    }
++
++    fn copy_block(&mut self) {
++        let block = self.conversation.last_exchange();
++        self.status_note = Some(copy_note(&self.clipboard, block.as_deref(), "block"));
++    }
++
+     fn toggle_sidebar(&mut self) {
+         self.sidebar_cursor = match self.sidebar_cursor {
+             Some(_) => None,
+@@ -403,6 +427,16 @@ impl App {
+     }
+ }
+ 
++fn copy_note(clipboard: &Clipboard, text: Option<&str>, what: &str) -> String {
++    let Some(text) = text else {
++        return NOTHING_TO_COPY.to_owned();
++    };
++    match clipboard.copy(text) {
++        Ok(()) => format!("{what} copied · characters: {}", text.chars().count()),
++        Err(error) => format!("not copied: {error:#}"),
++    }
++}
++
+ fn moved(scroll: &mut Scroll, action: Action) -> bool {
+     match action {
+         Action::Up => scroll.up(1),
+@@ -424,6 +458,7 @@ fn moved(scroll: &mut Scroll, action: Action) -> bool {
+ 
+ #[cfg(test)]
+ mod tests {
++    use blind_core::Usage;
+     use ratatui::crossterm::event::KeyCode;
+     use tempfile::TempDir;
+ 
+@@ -431,25 +466,45 @@ mod tests {
+     use crate::backend::test_support::offline;
+     use crate::chain_backend::test_support::unable_to_run;
+     use crate::chain_log::Kind;
++    use crate::clipboard::test_support::{Copied, broken, recording};
+     use crate::conversation::Speaker;
+     use crate::crew::test_support::explorer_planner_reviewer;
+     use crate::root_model::test_support::saved_in;
+     use crate::tui::keys::test_support::{ctrl, letter, plain};
+ 
+     fn app(dir: &TempDir) -> App {
+-        app_with(dir, Crew::default())
++        app_with(dir, Crew::default(), recording().0)
+     }
+ 
+-    fn app_with(dir: &TempDir, crew: Crew) -> App {
++    fn app_with(dir: &TempDir, crew: Crew, clipboard: Clipboard) -> App {
+         let ui = UiSettings::load(dir.path().join("ui.toml")).expect("ui settings");
+         let services = Services {
+             backend: offline(),
+             chain_backend: unable_to_run(),
+             crew,
++            clipboard,
+         };
+         App::new(services, saved_in(dir), ui)
+     }
+ 
++    fn copying(dir: &TempDir) -> (App, Copied) {
++        let (clipboard, copied) = recording();
++        (app_with(dir, Crew::default(), clipboard), copied)
++    }
++
++    fn streamed(app: &mut App, prompt: &str, parts: &[&str]) {
++        app.conversation.say(prompt.to_owned());
++        for part in parts {
++            app.conversation
++                .receive(ReplyEvent::Text((*part).to_owned()));
++        }
++    }
++
++    fn answered(app: &mut App, prompt: &str, parts: &[&str]) {
++        streamed(app, prompt, parts);
++        app.conversation.receive(ReplyEvent::Done(Usage::default()));
++    }
++
+     fn press_all(app: &mut App, keys: &[KeyEvent]) {
+         for key in keys {
+             assert_eq!(app.handle(*key), Flow::Continue);
+@@ -632,7 +687,7 @@ mod tests {
+     }
+ 
+     fn built(dir: &TempDir, keys: &[KeyEvent]) -> App {
+-        let mut app = app_with(dir, explorer_planner_reviewer());
++        let mut app = app_with(dir, explorer_planner_reviewer(), recording().0);
+         press_all(&mut app, &[ctrl('x'), letter('c')]);
+         press_all(&mut app, keys);
+         app
+@@ -918,4 +973,76 @@ mod tests {
+         press_all(&mut app, &[ctrl('x'), letter('2')]);
+         assert_eq!(app.handle(ctrl('c')), Flow::Quit);
+     }
++
++    #[test]
++    fn ctrl_x_y_copies_a_markdown_table_answer_exactly_as_root_wrote_it() {
++        let dir = tempfile::tempdir().expect("temp dir");
++        let (mut app, copied) = copying(&dir);
++        let header = "| agent | role |\n|---|---|\n";
++        let row = "| explorer | finds the files a task is about |\n";
++        let table = format!("{header}{row}");
++        answered(&mut app, "show the crew", &[header, row]);
++        press_all(&mut app, &[ctrl('x'), letter('y')]);
++        assert_eq!(*copied.borrow(), [table.as_str()]);
++        let note = format!("answer copied · characters: {}", table.chars().count());
++        assert_eq!(app.status_note.as_deref(), Some(note.as_str()));
++        assert_eq!(app.draft.text(), "");
++    }
++
++    #[test]
++    fn ctrl_x_shift_y_copies_the_prompt_a_blank_line_and_the_answer() {
++        let dir = tempfile::tempdir().expect("temp dir");
++        let (mut app, copied) = copying(&dir);
++        answered(&mut app, "one", &["first"]);
++        press_all(&mut app, &[ctrl('x'), letter('Y')]);
++        assert_eq!(*copied.borrow(), ["one\n\nfirst"]);
++        assert_eq!(
++            app.status_note.as_deref(),
++            Some("block copied · characters: 10")
++        );
++    }
++
++    #[test]
++    fn answer_still_being_printed_is_skipped_for_the_previous_finished_block() {
++        let dir = tempfile::tempdir().expect("temp dir");
++        let (mut app, copied) = copying(&dir);
++        answered(&mut app, "one", &["first"]);
++        streamed(&mut app, "two", &["sec"]);
++        press_all(&mut app, &[ctrl('x'), letter('y'), ctrl('x'), letter('Y')]);
++        assert_eq!(*copied.borrow(), ["first", "one\n\nfirst"]);
++    }
++
++    #[test]
++    fn empty_chat_copies_nothing_and_says_so() {
++        let dir = tempfile::tempdir().expect("temp dir");
++        let (mut app, copied) = copying(&dir);
++        press_all(&mut app, &[ctrl('x'), letter('y')]);
++        assert_eq!(app.status_note.as_deref(), Some(NOTHING_TO_COPY));
++        press_all(&mut app, &[ctrl('x'), letter('Y')]);
++        assert_eq!(app.status_note.as_deref(), Some(NOTHING_TO_COPY));
++        assert!(copied.borrow().is_empty());
++    }
++
++    #[test]
++    fn next_key_press_clears_the_copy_note() {
++        let dir = tempfile::tempdir().expect("temp dir");
++        let mut app = app(&dir);
++        answered(&mut app, "hi", &["Hello"]);
++        press_all(&mut app, &[ctrl('x'), letter('y')]);
++        assert!(app.status_note.is_some());
++        press_all(&mut app, &[letter('a')]);
++        assert_eq!(app.status_note, None);
++    }
++
++    #[test]
++    fn clipboard_that_fails_is_reported_in_the_note() {
++        let dir = tempfile::tempdir().expect("temp dir");
++        let mut app = app_with(&dir, Crew::default(), broken());
++        answered(&mut app, "hi", &["Hello"]);
++        press_all(&mut app, &[ctrl('x'), letter('y')]);
++        assert_eq!(
++            app.status_note.as_deref(),
++            Some("not copied: no clipboard here")
++        );
++    }
+ }

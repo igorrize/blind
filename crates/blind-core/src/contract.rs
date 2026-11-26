@@ -10,6 +10,7 @@ const TASK_FIELD: &str = "task";
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
     Worker,
+    Root,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -21,6 +22,7 @@ pub struct Rights {
     write: Vec<String>,
     read_from: Option<String>,
     tools: Option<Vec<ReadingTool>>,
+    written_as: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,7 +40,7 @@ struct Unchecked {
     name: AgentName,
     kind: Kind,
     input: Schema,
-    output: Schema,
+    output: Option<Schema>,
     #[serde(default)]
     rights: Rights,
 }
@@ -60,17 +62,32 @@ pub enum ContractError {
     ReadFromIsNotAListOfPaths(String),
     #[error("rights: read_from and tools make sense only together with read patterns")]
     FileRightsWithoutRead,
+    #[error("rights: written_as makes sense only together with write patterns")]
+    WrittenAsWithoutWrite,
+    #[error(
+        "rights: written_as names `{0}`, which is not an output field holding a list of strings"
+    )]
+    WrittenAsIsNotAListOfPaths(String),
+    #[error("root cannot write: it only talks and reads")]
+    RootCannotWrite,
+    #[error("a worker needs an output: it is what it hands to the next step")]
+    WorkerWithoutOutput,
+    #[error("root has no output: it answers the human")]
+    RootWithOutput,
+    #[error("root input must not require {0:?}: every chain has to be able to reach root")]
+    RootRequiresFields(Vec<String>),
 }
 
 impl Contract {
     pub fn from_json(json: &str) -> Result<Self, ContractError> {
         let unchecked: Unchecked = serde_json::from_str(json)?;
         let input = checked_object("input", unchecked.input)?;
-        let output = checked_object("output", unchecked.output)?;
+        let output = checked_output(unchecked.kind, unchecked.output, &input)?;
         if input.declares(TASK_FIELD) {
             return Err(ContractError::TaskIsReserved);
         }
         unchecked.rights.check_against(&input)?;
+        unchecked.rights.check_writing(unchecked.kind, &output)?;
         Ok(Self {
             name: unchecked.name,
             kind: unchecked.kind,
@@ -114,6 +131,10 @@ impl Rights {
         self.read_from.as_deref()
     }
 
+    pub fn written_as(&self) -> Option<&str> {
+        self.written_as.as_deref()
+    }
+
     pub fn tools(&self) -> Vec<ReadingTool> {
         self.tools
             .clone()
@@ -131,6 +152,35 @@ impl Rights {
             }
             Some(_) | None => Ok(()),
         }
+    }
+
+    fn check_writing(&self, kind: Kind, output: &ObjectSchema) -> Result<(), ContractError> {
+        if kind == Kind::Root && !self.write.is_empty() {
+            return Err(ContractError::RootCannotWrite);
+        }
+        match &self.written_as {
+            Some(_) if self.write.is_empty() => Err(ContractError::WrittenAsWithoutWrite),
+            Some(field) if !output.holds_a_list_of_strings(field) => {
+                Err(ContractError::WrittenAsIsNotAListOfPaths(field.clone()))
+            }
+            Some(_) | None => Ok(()),
+        }
+    }
+}
+
+fn checked_output(
+    kind: Kind,
+    output: Option<Schema>,
+    input: &ObjectSchema,
+) -> Result<ObjectSchema, ContractError> {
+    match (kind, output) {
+        (Kind::Worker, Some(output)) => checked_object("output", output),
+        (Kind::Worker, None) => Err(ContractError::WorkerWithoutOutput),
+        (Kind::Root, Some(_)) => Err(ContractError::RootWithOutput),
+        (Kind::Root, None) if !input.required().is_empty() => {
+            Err(ContractError::RootRequiresFields(input.required().to_vec()))
+        }
+        (Kind::Root, None) => Ok(ObjectSchema::empty()),
     }
 }
 
@@ -294,6 +344,98 @@ mod tests {
                 "{error}"
             );
         }
+    }
+
+    const ROOT_INPUT: &str = r#"{"type":"object","properties":{
+        "summary":{"type":"string"},
+        "findings":{"type":"array","items":{"type":"string"}}}}"#;
+
+    fn root(input: &str, output: Option<&str>) -> String {
+        let output = output
+            .map(|output| format!(r#","output":{output}"#))
+            .unwrap_or_default();
+        format!(r#"{{"name":"root","kind":"root","input":{input}{output}}}"#)
+    }
+
+    #[test]
+    fn root_takes_optional_fields_from_agents_and_has_no_output() {
+        let contract = Contract::from_json(&root(ROOT_INPUT, None)).expect("valid root");
+        assert_eq!(contract.kind(), Kind::Root);
+        assert!(contract.input().declares("summary"));
+        assert!(contract.input().required().is_empty());
+        assert_eq!(contract.output(), &ObjectSchema::empty());
+    }
+
+    #[test]
+    fn root_with_an_output_is_rejected() {
+        assert_eq!(
+            rejection(&root(ROOT_INPUT, Some(NO_FIELDS))),
+            "root has no output: it answers the human"
+        );
+    }
+
+    #[test]
+    fn root_that_requires_a_field_is_rejected() {
+        let strict = r#"{"type":"object","required":["summary"],"properties":{
+            "summary":{"type":"string"}}}"#;
+        assert_eq!(
+            rejection(&root(strict, None)),
+            r#"root input must not require ["summary"]: every chain has to be able to reach root"#
+        );
+    }
+
+    #[test]
+    fn worker_without_an_output_is_rejected() {
+        let json =
+            r#"{"name":"explorer","kind":"worker","input":{"type":"object","properties":{}}}"#;
+        assert_eq!(
+            rejection(json),
+            "a worker needs an output: it is what it hands to the next step"
+        );
+    }
+
+    const CHANGED: &str = r#"{"type":"object","required":["changed"],"properties":{
+        "changed":{"type":"array","items":{"type":"string"}},
+        "count":{"type":"integer"}}}"#;
+
+    fn writer(rights: &str) -> String {
+        format!(
+            r#"{{"name":"writer","kind":"worker","input":{NO_FIELDS},"output":{CHANGED},"rights":{rights}}}"#
+        )
+    }
+
+    #[test]
+    fn writer_can_let_the_harness_report_what_it_wrote() {
+        let rights = r#"{"read":["**"],"write":["crates/**"],"written_as":"changed"}"#;
+        let contract = Contract::from_json(&writer(rights)).expect("valid");
+        assert_eq!(contract.rights().written_as(), Some("changed"));
+        assert_eq!(contract.rights().write(), ["crates/**"]);
+    }
+
+    #[test]
+    fn written_as_needs_write_rights_and_an_output_list_of_strings() {
+        assert_eq!(
+            rejection(&writer(r#"{"read":["**"],"written_as":"changed"}"#)),
+            "rights: written_as makes sense only together with write patterns"
+        );
+        for field in ["count", "absent"] {
+            let rights = format!(r#"{{"write":["crates/**"],"written_as":"{field}"}}"#);
+            let error = rejection(&writer(&rights));
+            assert!(
+                error.contains("not an output field holding a list of strings"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn root_with_write_rights_is_rejected() {
+        let json = r#"{"name":"root","kind":"root","input":{"type":"object","properties":{}},
+            "rights":{"read":["**"],"write":["crates/**"]}}"#;
+        assert_eq!(
+            rejection(json),
+            "root cannot write: it only talks and reads"
+        );
     }
 
     #[test]

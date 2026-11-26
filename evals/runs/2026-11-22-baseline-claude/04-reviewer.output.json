@@ -1,0 +1,8 @@
+{
+  "findings": [
+    "conversation.rs last_answer/last_exchange: a chain report (chain_moved) or delegated task (send_to_chain does not wait for root) arriving while root streams splits the reply into several Root entries. Only the last is used, so Ctrl-X y/Y copy a fragment, not the whole answer (req. 3). Happens in normal use, e.g. a chain finishing mid-answer.",
+    "conversation.rs: fix it by keeping the full reply text for each prompt in one buffer (for example a String per entry in prompts, appended in append_reply), so last_answer can return the whole answer as &str. Add a test: split answer, then Done, copies the full text.",
+    "clipboard.rs piped: pbcopy decodes stdin using the locale settings. When LANG/LC_ALL are unset or set to C (some terminals, shells started from a GUI), Cyrillic and other non-ASCII text arrives mangled, so req. 3 (copy unchanged) fails. Set a UTF-8 locale on the child, e.g. .env(\"LC_ALL\", \"en_US.UTF-8\")."
+  ],
+  "approved": false
+}

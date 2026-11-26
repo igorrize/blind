@@ -1,0 +1,47 @@
+{
+  "name": "critic",
+  "kind": "worker",
+  "input": {
+    "type": "object",
+    "required": [
+      "changed"
+    ],
+    "properties": {
+      "changed": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "summary": {
+        "type": "string"
+      }
+    }
+  },
+  "output": {
+    "type": "object",
+    "required": [
+      "findings",
+      "approved"
+    ],
+    "properties": {
+      "findings": {
+        "type": "array",
+        "maxItems": 30,
+        "items": {
+          "type": "string",
+          "maxLength": 400
+        }
+      },
+      "approved": {
+        "type": "boolean"
+      }
+    }
+  },
+  "rights": {
+    "read": [
+      "**"
+    ],
+    "read_from": "changed"
+  }
+}

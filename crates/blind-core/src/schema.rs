@@ -1,5 +1,6 @@
 mod covers;
 mod json_schema;
+mod merge;
 mod project;
 mod validate;
 
@@ -11,6 +12,7 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 
 pub use covers::Mismatch;
+pub use merge::{Clash, merged_outputs};
 pub use validate::Violation;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -57,6 +59,13 @@ pub enum SchemaProblem {
 }
 
 impl ObjectSchema {
+    pub fn empty() -> Self {
+        Self {
+            properties: BTreeMap::new(),
+            required: Vec::new(),
+        }
+    }
+
     pub fn check(&self) -> Result<(), SchemaProblem> {
         self.check_at("")
     }
@@ -71,6 +80,13 @@ impl ObjectSchema {
 
     pub fn declares(&self, name: &str) -> bool {
         self.properties.contains_key(name)
+    }
+
+    pub fn without(&self, name: &str) -> Self {
+        let mut smaller = self.clone();
+        smaller.properties.remove(name);
+        smaller.required.retain(|required| required != name);
+        smaller
     }
 
     pub fn holds_a_list_of_strings(&self, name: &str) -> bool {
@@ -178,6 +194,20 @@ mod tests {
     fn rejects_negative_limit() {
         let error = rejection(r#"{"type":"string","maxLength":-1}"#);
         assert!(error.contains("expected u32"), "{error}");
+    }
+
+    #[test]
+    fn schema_without_a_field_neither_declares_nor_requires_it() {
+        let full = object(
+            r#"{"type":"object","required":["changed","summary"],"properties":{
+                "changed":{"type":"array","items":{"type":"string"}},
+                "summary":{"type":"string"}}}"#,
+        );
+        let smaller = full.without("changed");
+        assert!(!smaller.declares("changed"));
+        assert_eq!(smaller.required(), ["summary"]);
+        assert!(full.declares("changed"));
+        assert_eq!(full.without("absent"), full);
     }
 
     #[test]

@@ -11,6 +11,7 @@ use ignore::WalkBuilder;
 
 use crate::policy::{PathPolicy, PolicyError, ProjectPath, Refusal, pattern};
 use crate::search::Index;
+use crate::writing::Writing;
 
 pub const MAX_FILE_BYTES: u64 = 256 * 1024;
 pub const MAX_LISTED: usize = 500;
@@ -20,10 +21,11 @@ const GIT_FOLDER: &str = ".git";
 
 pub struct Workspace {
     root: PathBuf,
-    dir: Dir,
+    pub(crate) dir: Dir,
     policy: PathPolicy,
     tools: Vec<ReadingTool>,
     index: OnceLock<Result<Index, String>>,
+    pub(crate) writing: Option<Writing>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -58,6 +60,16 @@ pub enum ToolError {
     BadArguments(String),
     #[error("search is not available: {0}")]
     SearchUnavailable(String),
+    #[error("`{path}` was not written: {reason}")]
+    NotWritten { path: String, reason: String },
+    #[error("`old` is empty: give the exact text to replace in `{0}`")]
+    EmptyEdit(String),
+    #[error("`old` text is not in `{0}`: read the file and copy the text exactly")]
+    EditNotFound(String),
+    #[error(
+        "`old` text appears {count} times in `{path}`: add surrounding lines so it appears once"
+    )]
+    EditAmbiguous { path: String, count: usize },
 }
 
 impl Workspace {
@@ -79,6 +91,7 @@ impl Workspace {
             policy,
             tools: tools.to_vec(),
             index: OnceLock::new(),
+            writing: None,
         })
     }
 
@@ -119,7 +132,7 @@ impl Workspace {
         Some(path)
     }
 
-    fn text_of(&self, path: &ProjectPath) -> Result<String, ToolError> {
+    pub(crate) fn text_of(&self, path: &ProjectPath) -> Result<String, ToolError> {
         self.policy.permits(path)?;
         let resolved = self.resolved(path)?;
         let not_a_file = || ToolError::NotAFile(path.as_str().to_owned());
@@ -387,6 +400,19 @@ mod tests {
         let dir = sample();
         let listed = reading(&dir, &["**"]).list_files("**").expect("listed");
         assert_eq!(listed, "docs/DESIGN.md\nsrc/main.rs\nsrc/tui/app.rs");
+    }
+
+    #[test]
+    fn excluded_files_are_neither_listed_nor_read() {
+        let dir = sample();
+        let workspace = reading(&dir, &["**", "!src/tui/**"]);
+        let listed = workspace.list_files("**").expect("listed");
+        assert_eq!(listed, "docs/DESIGN.md\nsrc/main.rs");
+        let refused = workspace.read_file("src/tui/app.rs", LineRange::default(), None);
+        assert!(matches!(
+            refused,
+            Err(ToolError::Refused(Refusal::Excluded(_)))
+        ));
     }
 
     #[test]

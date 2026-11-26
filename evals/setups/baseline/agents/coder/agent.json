@@ -1,0 +1,11 @@
+{
+  "description": "Makes the planned change and its tests. Cannot run commands.",
+  "model": "ollama-cloud/glm-5.3-flash",
+  "limits": {
+    "tool_calls": 60,
+    "tokens": 600000
+  },
+  "rules": [
+    "rust"
+  ]
+}

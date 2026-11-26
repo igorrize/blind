@@ -4,17 +4,19 @@ use std::{
     thread,
 };
 
+use blind_core::{ObjectSchema, Violation};
+use serde_json::Value;
 use tokio::runtime::Runtime;
 
 use crate::chain_command;
-use crate::chain_log::RunEvent;
-use crate::chain_run::{self, ChainEvent, ChainOutcome, Link};
+use crate::chain_command::Prepared;
+use crate::chain_log::{Kind, RunEvent};
+use crate::chain_run::{self, ChainEvent, ChainOutcome};
+use crate::lineup::Lineup;
 use crate::runtime;
 use crate::step::Progress;
 
-const REMINDED: &str = "no `complete` call, reminding the agent";
-
-pub type Linker = Box<dyn Fn(&[String]) -> anyhow::Result<Vec<Link>> + Send>;
+pub type Linker = Box<dyn Fn(&Lineup) -> anyhow::Result<Prepared> + Send>;
 
 pub struct ChainBackend {
     requests: Sender<Run>,
@@ -22,23 +24,25 @@ pub struct ChainBackend {
 }
 
 struct Run {
-    agents: Vec<String>,
+    lineup: Lineup,
     task: String,
 }
 
 struct Worker {
     runtime: Runtime,
     linker: Linker,
+    root_input: ObjectSchema,
     events: Sender<RunEvent>,
 }
 
 impl ChainBackend {
-    pub fn start(linker: Linker) -> io::Result<Self> {
+    pub fn start(linker: Linker, root_input: ObjectSchema) -> io::Result<Self> {
         let (requests, pending) = mpsc::channel();
         let (events, received) = mpsc::channel();
         let worker = Worker {
             runtime: runtime::single_threaded()?,
             linker,
+            root_input,
             events,
         };
         thread::spawn(move || worker.serve(&pending));
@@ -48,9 +52,9 @@ impl ChainBackend {
         })
     }
 
-    pub fn run(&self, agents: &[String], task: &str) -> bool {
+    pub fn run(&self, lineup: &Lineup, task: &str) -> bool {
         let run = Run {
-            agents: agents.to_vec(),
+            lineup: lineup.clone(),
             task: task.to_owned(),
         };
         self.requests.send(run).is_ok()
@@ -70,14 +74,18 @@ impl Worker {
     }
 
     fn perform(&self, run: &Run) -> RunEvent {
-        let links = match (self.linker)(&run.agents) {
-            Ok(links) => links,
+        let prepared = match (self.linker)(&run.lineup) {
+            Ok(prepared) => prepared,
             Err(error) => return RunEvent::Failed(format!("{error:#}")),
         };
         let mut forward = |event: ChainEvent<'_>| self.emit(told(event));
-        let chain = chain_run::run_chain(&links, &run.task, &mut forward);
-        match self.runtime.block_on(chain) {
-            Ok(outcome) => ending(outcome),
+        let chain = chain_run::run_chain(&prepared.steps, &run.task, &mut forward);
+        let outcome = self.runtime.block_on(chain);
+        if let Some(changes) = prepared.changes(&run.lineup, &run.task) {
+            self.emit(RunEvent::Changes(changes));
+        }
+        match outcome {
+            Ok(outcome) => ending(outcome, &self.root_input),
             Err(error) => RunEvent::Failed(error.to_string()),
         }
     }
@@ -89,8 +97,14 @@ impl Worker {
 
 fn told(event: ChainEvent<'_>) -> RunEvent {
     match event {
-        ChainEvent::StepStarted(agent) => RunEvent::StepStarted(agent.to_owned()),
-        ChainEvent::Step(progress) => progress_told(progress),
+        ChainEvent::StepStarted(agents) => {
+            RunEvent::StepStarted(agents.iter().map(|agent| (*agent).to_owned()).collect())
+        }
+        ChainEvent::Step { agent, progress } => RunEvent::Step {
+            agent: agent.to_owned(),
+            kind: kind_of(&progress),
+            text: progress.described(),
+        },
         ChainEvent::StepResult(output) => RunEvent::StepResult(format!("{output:#}")),
         ChainEvent::StepFinished(record) => {
             RunEvent::StepFinished(chain_command::step_line(record))
@@ -98,31 +112,22 @@ fn told(event: ChainEvent<'_>) -> RunEvent {
     }
 }
 
-fn progress_told(progress: Progress<'_>) -> RunEvent {
+fn kind_of(progress: &Progress<'_>) -> Kind {
     match progress {
-        Progress::Text(text) => RunEvent::Text(text.to_owned()),
+        Progress::Text(_) => Kind::Said,
+        Progress::ToolCalled { refusal: None, .. } => Kind::Called,
         Progress::ToolCalled {
-            name,
-            arguments,
-            refusal,
-        } => RunEvent::ToolCalled {
-            call: format!("{name} {arguments}"),
-            refusal: refusal.map(str::to_owned),
-        },
-        Progress::Rejected(reason) => RunEvent::Note(reason.to_owned()),
-        Progress::Reminded => RunEvent::Note(REMINDED.to_owned()),
-        Progress::ToldToFinish(reason) => RunEvent::Note(format!(
-            "{reason}: tools are taken away, the agent must finish now"
-        )),
+            refusal: Some(_), ..
+        } => Kind::Refused,
+        Progress::Rejected(_) | Progress::Reminded | Progress::ToldToFinish(_) => Kind::Note,
     }
 }
 
-fn ending(outcome: ChainOutcome) -> RunEvent {
+fn ending(outcome: ChainOutcome, root_input: &ObjectSchema) -> RunEvent {
     match outcome {
-        ChainOutcome::Completed { output, steps } => RunEvent::Completed {
-            output: format!("{output:#}"),
-            total: chain_command::total_line(&steps),
-        },
+        ChainOutcome::Completed { output, steps } => {
+            delivered(&output, root_input, chain_command::total_line(&steps))
+        }
         ChainOutcome::Incompatible(error) => RunEvent::Stopped(format!(
             "chain is not compatible, no model was called: {error}"
         )),
@@ -133,6 +138,23 @@ fn ending(outcome: ChainOutcome) -> RunEvent {
     }
 }
 
+fn delivered(output: &Value, root_input: &ObjectSchema, total: String) -> RunEvent {
+    let handed = root_input.project(output);
+    let violations = root_input.violations(&handed);
+    if violations.is_empty() {
+        RunEvent::Completed {
+            output: format!("{handed:#}"),
+            total,
+        }
+    } else {
+        let problems: Vec<String> = violations.iter().map(Violation::to_string).collect();
+        RunEvent::Stopped(format!(
+            "root's contract refused the result: {}",
+            problems.join("; ")
+        ))
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod test_support {
     use anyhow::anyhow;
@@ -140,7 +162,8 @@ pub(crate) mod test_support {
     use super::ChainBackend;
 
     pub fn unable_to_run() -> ChainBackend {
-        ChainBackend::start(Box::new(|_| Err(anyhow!("no agents here")))).expect("backend starts")
+        let linker = Box::new(|_: &crate::lineup::Lineup| Err(anyhow!("no agents here")));
+        ChainBackend::start(linker, blind_core::ObjectSchema::empty()).expect("backend starts")
     }
 }
 
@@ -151,9 +174,11 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 
     use super::*;
-    use crate::crew::test_support::{FILES, FINDINGS, NO_FIELDS, agent};
+    use crate::chain_run::Link;
+    use crate::crew::test_support::{FILES, FINDINGS, NO_FIELDS, agent, root};
     use crate::providers::OpenAiCompatible;
     use crate::providers::openai::test_support::{sse, text_chunk, tool_call_chunk, usage_chunk};
+    use crate::step::REMINDED;
 
     const PATIENCE: Duration = Duration::from_secs(5);
     const FOUND: &str = r#"{"files":["src/main.rs"]}"#;
@@ -180,8 +205,8 @@ mod tests {
 
     fn explorer_then_reviewer(server: &MockServer) -> ChainBackend {
         let uri = server.uri();
-        let linker = move |names: &[String]| -> anyhow::Result<Vec<Link>> {
-            let links = names.iter().map(|name| {
+        let linker = move |lineup: &Lineup| -> anyhow::Result<Prepared> {
+            let link = |name: &String| {
                 let (input, output) = if name == "explorer" {
                     (NO_FIELDS, FILES)
                 } else {
@@ -192,10 +217,23 @@ mod tests {
                     client: OpenAiCompatible::new(&uri, None),
                     workspace: None,
                 }
-            });
-            Ok(links.collect())
+            };
+            let steps = lineup.steps().iter();
+            let steps = steps.map(|step| step.iter().map(link).collect()).collect();
+            Ok(Prepared::in_place(steps))
         };
-        ChainBackend::start(Box::new(linker)).expect("backend starts")
+        ChainBackend::start(Box::new(linker), root_taking_files_and_findings())
+            .expect("backend starts")
+    }
+
+    fn root_taking_files_and_findings() -> ObjectSchema {
+        root(
+            r#"{"type":"object","properties":{
+            "files":{"type":"array","items":{"type":"string"}},
+            "findings":{"type":"array","items":{"type":"string"}}}}"#,
+        )
+        .input()
+        .clone()
     }
 
     fn events_until_the_end(backend: &ChainBackend) -> Vec<RunEvent> {
@@ -213,30 +251,31 @@ mod tests {
         }
     }
 
-    fn names(agents: &[&str]) -> Vec<String> {
-        agents.iter().map(|name| (*name).to_owned()).collect()
+    fn lineup(arguments: &[&str]) -> Lineup {
+        let arguments: Vec<String> = arguments.iter().map(|text| (*text).to_owned()).collect();
+        Lineup::parse(&arguments)
+    }
+
+    fn stage(event: &RunEvent) -> &'static str {
+        match event {
+            RunEvent::StepStarted(_) => "started",
+            RunEvent::StepFinished(_) => "finished",
+            RunEvent::StepResult(_) => "result",
+            RunEvent::Completed { .. } => "completed",
+            RunEvent::Step { .. }
+            | RunEvent::Changes(_)
+            | RunEvent::Stopped(_)
+            | RunEvent::Failed(_) => "other",
+        }
     }
 
     #[tokio::test]
     async fn chain_runs_step_by_step_and_reports_every_stage() {
         let server = serving_in_order(vec![completing(FOUND), completing(REVIEWED)]).await;
         let backend = explorer_then_reviewer(&server);
-        assert!(backend.run(&names(&["explorer", "reviewer"]), "check it"));
+        assert!(backend.run(&lineup(&["explorer", "reviewer"]), "check it"));
         let events = events_until_the_end(&backend);
-        let stages: Vec<&str> = events
-            .iter()
-            .map(|event| match event {
-                RunEvent::StepStarted(_) => "started",
-                RunEvent::StepFinished(_) => "finished",
-                RunEvent::StepResult(_) => "result",
-                RunEvent::Completed { .. } => "completed",
-                RunEvent::Text(_)
-                | RunEvent::ToolCalled { .. }
-                | RunEvent::Note(_)
-                | RunEvent::Stopped(_)
-                | RunEvent::Failed(_) => "other",
-            })
-            .collect();
+        let stages: Vec<&str> = events.iter().map(stage).collect();
         assert_eq!(
             stages,
             [
@@ -249,7 +288,10 @@ mod tests {
                 "completed"
             ]
         );
-        assert_eq!(events[0], RunEvent::StepStarted("explorer".to_owned()));
+        assert_eq!(
+            events[0],
+            RunEvent::StepStarted(vec!["explorer".to_owned()])
+        );
         let Some(RunEvent::Completed { output, total }) = events.last() else {
             panic!("chain must complete");
         };
@@ -258,10 +300,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn step_of_two_agents_is_announced_with_both_names() {
+        let server = serving_in_order(vec![
+            completing(FOUND),
+            completing(REVIEWED),
+            completing(REVIEWED),
+        ])
+        .await;
+        let backend = explorer_then_reviewer(&server);
+        backend.run(&lineup(&["explorer", "reviewer+reviewer"]), "check it");
+        let events = events_until_the_end(&backend);
+        let both = RunEvent::StepStarted(vec!["reviewer".to_owned(), "reviewer".to_owned()]);
+        assert!(events.contains(&both), "{events:?}");
+        let Some(RunEvent::Completed { output, .. }) = events.last() else {
+            panic!("chain must complete");
+        };
+        assert_eq!(output.matches("looks fine").count(), 2, "{output}");
+    }
+
+    #[tokio::test]
     async fn incompatible_chain_is_stopped_before_any_request() {
         let server = serving_in_order(vec![]).await;
         let backend = explorer_then_reviewer(&server);
-        backend.run(&names(&["reviewer"]), "check it");
+        backend.run(&lineup(&["reviewer"]), "check it");
         let events = events_until_the_end(&backend);
         let [RunEvent::Stopped(why)] = events.as_slice() else {
             panic!("chain must be stopped at once: {events:?}");
@@ -288,7 +349,7 @@ mod tests {
             .mount(&server)
             .await;
         let backend = explorer_then_reviewer(&server);
-        backend.run(&names(&["explorer", "reviewer"]), "check it");
+        backend.run(&lineup(&["explorer", "reviewer"]), "check it");
         let events = events_until_the_end(&backend);
         assert_eq!(
             events.last(),
@@ -296,14 +357,19 @@ mod tests {
                 "stopped at `explorer`: it gave no valid result".to_owned()
             ))
         );
-        assert!(events.contains(&RunEvent::Text("I will just talk.".to_owned())));
-        assert!(events.contains(&RunEvent::Note(REMINDED.to_owned())));
+        let by_explorer = |kind: Kind, text: &str| RunEvent::Step {
+            agent: "explorer".to_owned(),
+            kind,
+            text: text.to_owned(),
+        };
+        assert!(events.contains(&by_explorer(Kind::Said, "I will just talk.")));
+        assert!(events.contains(&by_explorer(Kind::Note, REMINDED)));
     }
 
     #[test]
     fn chain_that_cannot_be_prepared_fails_with_the_reason() {
         let backend = test_support::unable_to_run();
-        backend.run(&names(&["explorer"]), "check it");
+        backend.run(&lineup(&["explorer"]), "check it");
         assert_eq!(
             events_until_the_end(&backend),
             [RunEvent::Failed("no agents here".to_owned())]
@@ -315,9 +381,71 @@ mod tests {
         let server = serving_in_order(vec![completing(FOUND), completing(FOUND)]).await;
         let backend = explorer_then_reviewer(&server);
         for _ in 0..2 {
-            backend.run(&names(&["explorer"]), "check it");
+            backend.run(&lineup(&["explorer"]), "check it");
             let events = events_until_the_end(&backend);
             assert!(matches!(events.last(), Some(RunEvent::Completed { .. })));
         }
+    }
+
+    #[test]
+    fn root_gets_only_the_fields_its_contract_declares() {
+        let output = serde_json::json!({"findings": ["unused import"], "secret": "drop me"});
+        let event = delivered(
+            &output,
+            &root_taking_files_and_findings(),
+            "total".to_owned(),
+        );
+        let RunEvent::Completed { output, .. } = event else {
+            panic!("result must be delivered");
+        };
+        assert!(output.contains("unused import"), "{output}");
+        assert!(!output.contains("drop me"), "{output}");
+    }
+
+    #[test]
+    fn result_of_the_wrong_type_is_refused_at_delivery() {
+        let output = serde_json::json!({"findings": "one long text"});
+        let event = delivered(
+            &output,
+            &root_taking_files_and_findings(),
+            "total".to_owned(),
+        );
+        assert_eq!(
+            event,
+            RunEvent::Stopped(
+                "root's contract refused the result: `findings` must be an array".to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn root_without_a_contract_learns_only_that_the_chain_finished() {
+        let output = serde_json::json!({"findings": ["unused import"]});
+        let event = delivered(&output, &ObjectSchema::empty(), "total".to_owned());
+        assert_eq!(
+            event,
+            RunEvent::Completed {
+                output: "{}".to_owned(),
+                total: "total".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn every_kind_of_progress_lands_in_its_own_kind_of_line() {
+        let called = Progress::ToolCalled {
+            name: "grep",
+            arguments: "{}",
+            refusal: None,
+        };
+        let refused = Progress::ToolCalled {
+            name: "read_file",
+            arguments: "{}",
+            refusal: Some("not given"),
+        };
+        assert_eq!(kind_of(&Progress::Text("hi")), Kind::Said);
+        assert_eq!(kind_of(&called), Kind::Called);
+        assert_eq!(kind_of(&refused), Kind::Refused);
+        assert_eq!(kind_of(&Progress::Reminded), Kind::Note);
     }
 }

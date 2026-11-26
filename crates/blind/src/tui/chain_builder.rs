@@ -9,8 +9,8 @@ use ratatui::{
 use super::theme::Theme;
 use super::wrap::{hanging, height_of, wrapped};
 use crate::crew::Candidate;
+use crate::lineup::Lineup;
 
-pub const ARROW: &str = " → ";
 const TITLE: &str = " chain ";
 const NEXT_STEP: &str = "?";
 const NO_AGENTS: &str = "No agents: put agent folders into .blind/agents and restart blind.";
@@ -20,34 +20,54 @@ const WIDEST: u16 = 96;
 const FRAME: u16 = 2;
 
 pub struct ChainBuilder<'a> {
-    chain: &'a [String],
+    lineup: &'a Lineup,
+    beside: bool,
     candidates: &'a [Candidate],
+    notice: Option<&'a str>,
     theme: Theme,
 }
 
 impl<'a> ChainBuilder<'a> {
-    pub fn new(chain: &'a [String], candidates: &'a [Candidate], theme: Theme) -> Self {
+    pub fn new(
+        lineup: &'a Lineup,
+        beside: bool,
+        candidates: &'a [Candidate],
+        theme: Theme,
+    ) -> Self {
         Self {
-            chain,
+            lineup,
+            beside,
             candidates,
+            notice: None,
             theme,
         }
     }
 
+    pub fn with_notice(mut self, notice: Option<&'a str>) -> Self {
+        self.notice = notice;
+        self
+    }
+
     fn lines(&self, width: usize) -> Vec<Line<'static>> {
-        let chain = wrapped(&self.chain_so_far(), width, self.theme.open_item());
+        let so_far = self.lineup.with(NEXT_STEP, self.beside).to_string();
+        let chain = wrapped(&so_far, width, self.theme.open_item());
         let candidates = self.candidate_lines(width);
+        let notice = self.notice_lines(width);
         chain
             .into_iter()
             .chain(std::iter::once(Line::default()))
             .chain(candidates)
+            .chain(notice)
             .collect()
     }
 
-    fn chain_so_far(&self) -> String {
-        let steps = self.chain.iter().map(String::as_str);
-        let with_next: Vec<&str> = steps.chain(std::iter::once(NEXT_STEP)).collect();
-        with_next.join(ARROW)
+    fn notice_lines(&self, width: usize) -> Vec<Line<'static>> {
+        let Some(notice) = self.notice else {
+            return Vec::new();
+        };
+        let mut lines = vec![Line::default()];
+        lines.extend(wrapped(notice, width, self.theme.error()));
+        lines
     }
 
     fn candidate_lines(&self, width: usize) -> Vec<Line<'static>> {
@@ -108,7 +128,7 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::test_support::{rendered, rendered_text, style_of};
+    use crate::tui::test_support::{buffer_text, rendered, rendered_text, style_of};
 
     fn candidate(name: &str, obstacle: Option<&str>) -> Candidate {
         Candidate {
@@ -125,30 +145,43 @@ mod tests {
         ]
     }
 
+    fn lineup(arguments: &[&str]) -> Lineup {
+        let arguments: Vec<String> = arguments.iter().map(|text| (*text).to_owned()).collect();
+        Lineup::parse(&arguments)
+    }
+
+    fn shown(lineup: &Lineup, beside: bool) -> String {
+        let candidates = explorer_and_reviewer();
+        let builder = ChainBuilder::new(lineup, beside, &candidates, Theme::default());
+        rendered_text(builder, 80, 10)
+    }
+
     #[test]
     fn empty_chain_asks_for_the_first_step() {
-        let candidates = explorer_and_reviewer();
-        let builder = ChainBuilder::new(&[], &candidates, Theme::default());
-        let text = rendered_text(builder, 80, 10);
+        let text = shown(&Lineup::default(), false);
         assert!(text.contains(" chain "), "{text}");
         assert!(text.contains("│?"), "{text}");
     }
 
     #[test]
     fn chain_so_far_ends_with_the_place_for_the_next_step() {
-        let chain = ["explorer".to_owned(), "reviewer".to_owned()];
-        let candidates = explorer_and_reviewer();
-        let builder = ChainBuilder::new(&chain, &candidates, Theme::default());
-        let text = rendered_text(builder, 80, 10);
+        let text = shown(&lineup(&["explorer", "reviewer"]), false);
         assert!(text.contains("explorer → reviewer → ?"), "{text}");
+    }
+
+    #[test]
+    fn place_beside_the_last_step_is_shown_with_a_plus() {
+        let text = shown(&lineup(&["explorer", "reviewer"]), true);
+        assert!(text.contains("explorer → reviewer + ?"), "{text}");
     }
 
     #[test]
     fn fitting_candidate_has_a_number_and_an_unfit_one_has_the_reason() {
         let theme = Theme::default();
         let candidates = explorer_and_reviewer();
-        let buffer = rendered(ChainBuilder::new(&[], &candidates, theme), 80, 10);
-        let text = crate::tui::test_support::buffer_text(&buffer);
+        let empty = Lineup::default();
+        let buffer = rendered(ChainBuilder::new(&empty, false, &candidates, theme), 80, 10);
+        let text = buffer_text(&buffer);
         assert!(text.contains(" 1  explorer       The explorer."), "{text}");
         assert!(
             text.contains("    reviewer       cannot go first: needs files"),
@@ -164,23 +197,42 @@ mod tests {
             "reviewer",
             Some("does not fit after planner: `files` is required but not guaranteed"),
         )];
-        let builder = ChainBuilder::new(&[], &candidates, Theme::default());
+        let empty = Lineup::default();
+        let builder = ChainBuilder::new(&empty, false, &candidates, Theme::default());
         let text = rendered_text(builder, 44, 12);
         assert!(text.contains("guaranteed"), "{text}");
     }
 
     #[test]
+    fn notice_is_shown_below_the_candidates() {
+        let candidates = explorer_and_reviewer();
+        let empty = Lineup::default();
+        let builder = ChainBuilder::new(&empty, false, &candidates, Theme::default())
+            .with_notice(Some("root cannot take the result of `explorer`"));
+        let text = rendered_text(builder, 80, 12);
+        let notice = text.find("root cannot take").expect("notice is shown");
+        let candidate = text
+            .find("explorer       The explorer.")
+            .expect("candidate is shown");
+        assert!(candidate < notice, "{text}");
+    }
+
+    #[test]
     fn crew_without_agents_says_where_to_put_them() {
-        let builder = ChainBuilder::new(&[], &[], Theme::default());
+        let empty = Lineup::default();
+        let builder = ChainBuilder::new(&empty, false, &[], Theme::default());
         let text = rendered_text(builder, 80, 10);
         assert!(text.contains(".blind/agents"), "{text}");
     }
 
     #[test]
     fn window_fits_into_a_small_screen() {
-        let candidates = explorer_and_reviewer();
-        let builder = ChainBuilder::new(&[], &candidates, Theme::default());
-        let text = rendered_text(builder, 30, 3);
+        let text = {
+            let candidates = explorer_and_reviewer();
+            let empty = Lineup::default();
+            let builder = ChainBuilder::new(&empty, false, &candidates, Theme::default());
+            rendered_text(builder, 30, 3)
+        };
         assert!(text.contains(" chain "), "{text}");
     }
 }

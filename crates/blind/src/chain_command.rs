@@ -5,52 +5,93 @@ use blind_core::{Agent, ChainError, Contract, Usage, Violation, check_chain};
 
 use crate::agents;
 use crate::chain_run::{self, ChainEvent, ChainOutcome, Link, StepRecord, StopReason};
-use crate::providers::{self, config};
+use crate::lineup::Lineup;
+use crate::providers::{self, config, config::ProvidersConfig};
 use crate::run_agent::show_progress;
 use crate::runtime;
-use crate::step;
+use crate::step::{self, Ground, Progress};
+use crate::workplace::Workplace;
 
-const ARROW: &str = " → ";
-
-pub fn check(dir: &Path, names: &[String]) -> anyhow::Result<ExitCode> {
-    let agents = load(dir, names)?;
+pub fn check(dir: &Path, arguments: &[String]) -> anyhow::Result<ExitCode> {
+    let lineup = Lineup::parse(arguments);
+    let agents = load(dir, &lineup)?;
     Ok(match compatibility(&agents) {
         Ok(()) => {
-            println!("ok: {}", names.join(ARROW));
+            println!("ok: {lineup}");
             ExitCode::SUCCESS
         }
         Err(error) => refuse(&error),
     })
 }
 
-pub fn run(dir: &Path, project: &Path, names: &[String], task: &str) -> anyhow::Result<ExitCode> {
-    let agents = load(dir, names)?;
+pub fn run(
+    dir: &Path,
+    project: &Path,
+    arguments: &[String],
+    task: &str,
+) -> anyhow::Result<ExitCode> {
+    let lineup = Lineup::parse(arguments);
+    let agents = load(dir, &lineup)?;
     if let Err(error) = compatibility(&agents) {
         return Ok(refuse(&error));
     }
-    let links = connect(agents, project)?;
-    let mut show = show_event;
-    let chain = chain_run::run_chain(&links, task, &mut show);
-    let outcome = runtime::block_on(chain)??;
-    Ok(report(outcome))
+    let prepared = connected(agents, project)?;
+    let mut printer = Printer::default();
+    let mut show = |event: ChainEvent<'_>| printer.show(event);
+    let chain = chain_run::run_chain(&prepared.steps, task, &mut show);
+    let outcome = runtime::block_on(chain)?;
+    if let Some(changes) = prepared.changes(&lineup, task) {
+        eprintln!("\n{changes}");
+    }
+    Ok(report(outcome?))
 }
 
-pub fn links(dir: &Path, project: &Path, names: &[String]) -> anyhow::Result<Vec<Link>> {
-    connect(load(dir, names)?, project)
+pub struct Prepared {
+    pub steps: Vec<Vec<Link>>,
+    workplace: Workplace,
 }
 
-fn load(dir: &Path, names: &[String]) -> anyhow::Result<Vec<Agent>> {
-    names
+impl Prepared {
+    pub fn changes(&self, lineup: &Lineup, task: &str) -> Option<String> {
+        match self.workplace.changes(&lineup.to_string(), task) {
+            Ok(changes) => changes.map(|changes| changes.described()),
+            Err(error) => Some(format!("the copy could not be finished: {error:#}")),
+        }
+    }
+}
+
+pub fn prepare(dir: &Path, project: &Path, lineup: &Lineup) -> anyhow::Result<Prepared> {
+    let agents = load(dir, lineup)?;
+    if let Err(error) = compatibility(&agents) {
+        anyhow::bail!("chain is not compatible, no model was called: {error}");
+    }
+    connected(agents, project)
+}
+
+fn connected(agents: Vec<Vec<Agent>>, project: &Path) -> anyhow::Result<Prepared> {
+    let workplace = Workplace::for_agents(agents.iter().flatten(), project)?;
+    let steps = connect(agents, workplace.ground())?;
+    Ok(Prepared { steps, workplace })
+}
+
+fn load(dir: &Path, lineup: &Lineup) -> anyhow::Result<Vec<Vec<Agent>>> {
+    lineup
+        .steps()
         .iter()
-        .map(|name| {
-            agents::load_one(dir, name)
-                .with_context(|| format!("cannot load agent `{name}` from {}", dir.display()))
-        })
+        .map(|step| step.iter().map(|name| load_agent(dir, name)).collect())
         .collect()
 }
 
-fn compatibility(agents: &[Agent]) -> Result<(), ChainError> {
-    let contracts: Vec<&Contract> = agents.iter().map(Agent::contract).collect();
+fn load_agent(dir: &Path, name: &str) -> anyhow::Result<Agent> {
+    agents::load_one(dir, name)
+        .with_context(|| format!("cannot load agent `{name}` from {}", dir.display()))
+}
+
+fn compatibility(agents: &[Vec<Agent>]) -> Result<(), ChainError> {
+    let contracts: Vec<Vec<&Contract>> = agents
+        .iter()
+        .map(|step| step.iter().map(Agent::contract).collect())
+        .collect();
     check_chain(&contracts)
 }
 
@@ -59,28 +100,63 @@ fn refuse(error: &ChainError) -> ExitCode {
     ExitCode::FAILURE
 }
 
-fn connect(agents: Vec<Agent>, project: &Path) -> anyhow::Result<Vec<Link>> {
+fn connect(agents: Vec<Vec<Agent>>, ground: Ground<'_>) -> anyhow::Result<Vec<Vec<Link>>> {
     let config = config::load()?;
     agents
         .into_iter()
-        .map(|agent| {
-            let client = providers::connect(&config, agent.settings().model().provider())?;
-            let workspace = step::workspace_for(&agent, project)?;
-            Ok(Link {
-                agent,
-                client,
-                workspace,
-            })
+        .map(|step| {
+            step.into_iter()
+                .map(|agent| link(&config, agent, ground))
+                .collect()
         })
         .collect()
 }
 
-fn show_event(event: ChainEvent<'_>) {
-    match event {
-        ChainEvent::StepStarted(name) => eprintln!("→ {name}"),
-        ChainEvent::Step(progress) => show_progress(progress),
-        ChainEvent::StepResult(output) => eprintln!("{output:#}"),
-        ChainEvent::StepFinished(record) => eprintln!("\n{}", step_line(record)),
+fn link(config: &ProvidersConfig, agent: Agent, ground: Ground<'_>) -> anyhow::Result<Link> {
+    let client = providers::connect(config, agent.settings().model().provider())?;
+    let workspace = step::workspace_for(&agent, ground)?;
+    Ok(Link {
+        agent,
+        client,
+        workspace,
+    })
+}
+
+#[cfg(test)]
+impl Prepared {
+    pub fn in_place(steps: Vec<Vec<Link>>) -> Self {
+        Self {
+            steps,
+            workplace: crate::workplace::test_support::in_place(Path::new(".")),
+        }
+    }
+}
+
+#[derive(Default)]
+struct Printer {
+    side_by_side: bool,
+}
+
+impl Printer {
+    fn show(&mut self, event: ChainEvent<'_>) {
+        match event {
+            ChainEvent::StepStarted(agents) => {
+                self.side_by_side = agents.len() > 1;
+                eprintln!("→ {}", agents.join(" + "));
+            }
+            ChainEvent::Step { agent, progress } if self.side_by_side => {
+                show_signed(agent, &progress);
+            }
+            ChainEvent::Step { progress, .. } => show_progress(progress),
+            ChainEvent::StepResult(output) => eprintln!("{output:#}"),
+            ChainEvent::StepFinished(record) => eprintln!("\n{}", step_line(record)),
+        }
+    }
+}
+
+fn show_signed(agent: &str, progress: &Progress<'_>) {
+    if !matches!(progress, Progress::Text(_)) {
+        eprintln!("{agent}: {}", progress.described());
     }
 }
 

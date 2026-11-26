@@ -8,6 +8,7 @@ use crate::agents;
 use crate::providers::{self, config};
 use crate::runtime;
 use crate::step::{self, Progress, StepOutcome, StepReport};
+use crate::workplace::Workplace;
 
 pub fn run(
     dir: &Path,
@@ -24,13 +25,17 @@ pub fn run(
         eprintln!("{}", input_rejection(&violations));
         return Ok(ExitCode::FAILURE);
     }
-    let workspace = step::workspace_for(&agent, project)?;
     let config = config::load()?;
     let client = providers::connect(&config, agent.settings().model().provider())?;
+    let workplace = Workplace::for_agents([&agent], project)?;
+    let workspace = step::workspace_for(&agent, workplace.ground())?;
     let mut show = show_progress;
     let step = step::run_step(workspace.as_ref(), &client, &agent, task, &input, &mut show);
-    let outcome = runtime::block_on(step)??;
-    Ok(report(&agent, outcome))
+    let outcome = runtime::block_on(step)?;
+    if let Some(changes) = workplace.changes(name, task)? {
+        eprintln!("\n{}", changes.described());
+    }
+    Ok(report(&agent, outcome?))
 }
 
 fn parsed_input(input: Option<&str>) -> anyhow::Result<Value> {
@@ -43,20 +48,9 @@ fn parsed_input(input: Option<&str>) -> anyhow::Result<Value> {
 pub fn show_progress(progress: Progress<'_>) {
     match progress {
         Progress::Text(text) => eprint!("{text}"),
-        Progress::ToolCalled {
-            name,
-            arguments,
-            refusal: None,
-        } => eprintln!("· {name} {arguments}"),
-        Progress::ToolCalled {
-            name,
-            arguments,
-            refusal: Some(refusal),
-        } => eprintln!("✗ {name} {arguments} — {refusal}"),
-        Progress::Rejected(reason) => eprintln!("\n{reason}"),
-        Progress::Reminded => eprintln!("\nno `complete` call, reminding the agent"),
-        Progress::ToldToFinish(reason) => {
-            eprintln!("\n{reason}: tools are taken away, the agent must finish now");
+        Progress::ToolCalled { .. } => eprintln!("{}", progress.described()),
+        Progress::Rejected(_) | Progress::Reminded | Progress::ToldToFinish(_) => {
+            eprintln!("\n{}", progress.described());
         }
     }
 }

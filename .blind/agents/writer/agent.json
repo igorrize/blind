@@ -1,0 +1,11 @@
+{
+  "description": "Makes the change a task asks for; makes given tests pass without touching them.",
+  "model": "ollama-cloud/glm-5.3-flash",
+  "limits": {
+    "tool_calls": 60,
+    "tokens": 600000
+  },
+  "rules": [
+    "rust"
+  ]
+}

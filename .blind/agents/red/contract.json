@@ -1,0 +1,55 @@
+{
+  "name": "red",
+  "kind": "worker",
+  "input": {
+    "type": "object",
+    "properties": {
+      "files": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "output": {
+    "type": "object",
+    "required": [
+      "tests",
+      "files",
+      "summary"
+    ],
+    "properties": {
+      "tests": {
+        "type": "array",
+        "maxItems": 30,
+        "items": {
+          "type": "string",
+          "maxLength": 200
+        }
+      },
+      "files": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "maxItems": 20
+      },
+      "summary": {
+        "type": "string",
+        "maxLength": 2000
+      }
+    }
+  },
+  "rights": {
+    "read": [
+      "**"
+    ],
+    "write": [
+      "crates/**/tests.rs",
+      "crates/*/tests/**"
+    ],
+    "written_as": "files"
+  }
+}
